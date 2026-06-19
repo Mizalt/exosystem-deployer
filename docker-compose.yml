@@ -1,0 +1,75 @@
+# --- docker-compose.yml ---
+# Полный стек «ядра инфраструктуры» в контейнерах (ADR-002).
+# Запуск всего одной командой:  docker compose up -d --build
+#
+# Сетевая модель (ADR сетевой модели): все сервисы и создаваемые деплоером
+# app-контейнеры — в общей сети deployer-net и резолвятся по имени контейнера.
+# Host-порты публикует только nginx (80/443).
+
+services:
+  # Reverse-proxy. Создаётся здесь (а НЕ деплоером), потому что использует
+  # bind-mount'ы, чьи пути должны резолвиться на хосте.
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: deployer-nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx_configs:/etc/nginx/conf.d
+      - ./ssl_certs:/etc/letsencrypt
+      - ./acme_challenge:/var/www/acme_challenge
+    networks:
+      - deployer-net
+
+  # Companion для выпуска/обновления Let's Encrypt сертификатов. Просто «спит»,
+  # деплоер дергает его через `docker exec`.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: deployer-certbot-companion
+    restart: unless-stopped
+    # Полный entrypoint-список: иначе compose токенизирует command по пробелам
+    # и `sh -c` получает только первое слово, контейнер сразу выходит.
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do sleep 1; done"]
+    user: root
+    volumes:
+      - ./ssl_certs:/etc/letsencrypt
+      - ./acme_challenge:/var/www/acme_challenge
+    networks:
+      - deployer-net
+
+  # Само ядро. Управляет Docker через смонтированный сокет, создаёт app-контейнеры.
+  deployer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deployer
+    restart: unless-stopped
+    depends_on:
+      - nginx
+      - certbot
+    environment:
+      # Для прода задайте сильный ключ в .env (см. .env.example).
+      - DEPLOYER_SECRET_KEY=${DEPLOYER_SECRET_KEY:-}
+      # Как nginx видит деплоер в общей сети — по имени контейнера.
+      - DEPLOYER_PROXY_HOST=deployer
+    volumes:
+      # Доступ к Docker хоста — ядро управляет контейнерами.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Общие с nginx/certbot тома (деплоер генерирует конфиги и сертификаты).
+      - ./nginx_configs:/app/nginx_configs
+      - ./ssl_certs:/app/ssl_certs
+      - ./acme_challenge:/app/acme_challenge
+      # Загруженные артефакты приложений.
+      - ./uploads:/app/uploads
+      # Всё приватное состояние деплоера (БД, secret.key, настройки панели) —
+      # одним каталогом. Чистая деинсталляция: down + rm -rf data.
+      - ./data:/app/data
+    networks:
+      - deployer-net
+
+networks:
+  deployer-net:
+    name: deployer-net
+    driver: bridge

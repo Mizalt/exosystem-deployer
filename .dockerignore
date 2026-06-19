@@ -1,0 +1,32 @@
+# Контекст сборки образа деплоера — исключаем лишнее и боевые данные.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.idea/
+.vscode/
+.git/
+.gitignore
+
+# Runtime data (монтируется как тома, а не зашивается в образ)
+data/
+deployer.db
+deployer.db-journal
+uploads/
+ssl_certs/
+acme_challenge/
+nginx_configs/
+panel_settings.json
+*.log
+
+# Секреты
+.env
+.env.*
+secret.key
+
+# Документация и прототипы — не нужны в образе
+docs/
+old_features.md
+new_plan.md
+proto.html
+*.md

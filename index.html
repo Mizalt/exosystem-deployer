@@ -1,0 +1,117 @@
+<!-- --- ПОЛНЫЙ И ИСПРАВЛЕННЫЙ ФАЙЛ: index.html --- -->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Deploy Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500&family=Roboto+Mono&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+    <!-- --- ЭКРАН ВХОДА --- -->
+    <div id="login-screen" style="width: 100vw; height: 100vh; background: var(--bg-main); display: flex; align-items: center; justify-content: center; z-index: 2000; position: fixed;">
+        <div class="modal" style="display: block; transform: none; width: 400px;">
+            <div class="modal-header"><h3 class="modal-title">Вход в панель</h3></div>
+            <form id="loginForm">
+                <div class="form-group"><label>Имя пользователя</label><input type="text" name="username" required autocomplete="username"></div>
+                <div class="form-group"><label>Пароль</label><input type="password" name="password" required autocomplete="current-password"></div>
+                <div id="loginError" style="color: var(--danger); font-size: 14px; margin-top: 16px; min-height: 1em;"></div>
+                <div class="modal-footer" style="margin-top: 8px;">
+                    <button type="submit" class="btn btn-primary deploy-action">Войти</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- --- ОСНОВНОЙ ИНТЕРФЕЙС ПРИЛОЖЕНИЯ (скрыт по умолчанию) --- -->
+    <div id="app-container" style="display: none; width: 100%; height: 100vh; display: flex;">
+        <aside>
+            <div class="logo"><span class="material-symbols-outlined">cloud_done</span><span>Cloud Deploy</span></div>
+            <nav>
+                <div class="nav-item" data-page="dashboard"><span class="material-symbols-outlined">dashboard</span>Дашборд</div>
+                <div class="nav-item" data-page="blueprints"><span class="material-symbols-outlined">widgets</span>Библиотека</div>
+                <div class="nav-item active" data-page="services"><span class="material-symbols-outlined">dns</span>Сервисы</div>
+                <div class="nav-item" data-page="applications"><span class="material-symbols-outlined">public</span>Приложения</div>
+                <div class="nav-item" data-page="ssl"><span class="material-symbols-outlined">shield_lock</span>SSL</div>
+                <div class="nav-item" data-page="settings"><span class="material-symbols-outlined">settings</span>Настройки</div>
+            </nav>
+            <div style="margin-top: auto;">
+                 <div class="nav-item" id="logoutBtn" style="color: var(--danger);"><span class="material-symbols-outlined">logout</span>Выход</div>
+            </div>
+        </aside>
+
+        <main id="main-content">
+            <!-- Содержимое будет динамически загружено -->
+        </main>
+    </div>
+
+    <!-- === МОДАЛЬНЫЕ ОКНА === -->
+
+    <!-- Модальное окно для ЗАПУСКА СЕРВИСА -->
+    <div class="modal-backdrop" id="serviceModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Запустить новый сервис</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="serviceForm">
+                <p style="font-size: 14px; color: var(--text-secondary); margin-bottom: 16px;">Сервис - это запущенный контейнер, доступный по внутреннему порту. Позже его можно будет опубликовать, создав Приложение.</p>
+                <div class="form-group"><label>1. Выберите приложение из библиотеки</label><select id="select_blueprint" required><option disabled selected>Загрузка...</option></select></div>
+                <div class="form-group"><label>2. Выберите версию (артефакт)</label><select id="select_artifact" name="artifact_id" required><option disabled selected>Выберите приложение</option></select></div>
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                <div class="form-group"><label>3. Имя сервиса (уникальное, a-z, 0-9, -)</label><input type="text" name="name" required pattern="^[a-z0-9\\-]+$" placeholder="my-backend-service"></div>
+                <div class="form-group"><label>4. Группа портов</label><select name="group_name" required><option disabled selected>Загрузка...</option></select></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Запустить</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно для ОБНОВЛЕНИЯ/ОТКАТА СЕРВИСА -->
+    <div class="modal-backdrop" id="redeployModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Обновить / Откатить сервис</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="redeployForm">
+                 <input type="hidden" name="service_id">
+                 <div class="form-group"><label>Сервис</label><input type="text" id="redeployServiceName" disabled></div>
+                 <div class="form-group"><label>Текущая версия</label><input type="text" id="redeployCurrentVersion" disabled></div>
+                 <hr style="border-color: var(--border); margin: 20px 0;">
+                 <div class="form-group"><label>Выберите новую версию для развертывания</label><select name="artifact_id" required><option disabled selected>Загрузка...</option></select></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Развернуть</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно для ПУБЛИКАЦИИ ПРИЛОЖЕНИЯ -->
+    <div class="modal-backdrop" id="applicationModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Опубликовать приложение</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="applicationForm">
+                 <p style="font-size: 14px; color: var(--text-secondary); margin-bottom: 16px;">Приложение - это публичная точка входа (домен), которая указывает на один из ваших запущенных сервисов.</p>
+                <div class="form-group"><label>1. Выберите сервис для публикации</label><select name="service_id" required><option disabled selected>Загрузка...</option></select></div>
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                <div class="form-group"><label>2. Имя приложения (уникальное, a-z, 0-9, -)</label><input type="text" name="name" required pattern="^[a-z0--9\\-]+$" placeholder="my-public-app"></div>
+                <div class="form-group"><label>3. Домен</label><input type="text" name="domain" required placeholder="app.example.com"></div>
+                 <div class="form-group"><label>4. SSL Сертификат (необязательно)</label><select name="ssl_cert_name"><option value="">Без SSL (HTTP)</option></select></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Опубликовать</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно для ЗАГРУЗКИ АРТЕФАКТА -->
+    <div class="modal-backdrop" id="uploadArtifactModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Загрузить новую версию</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="uploadArtifactForm">
+                <input type="hidden" name="blueprint_id">
+                <div class="form-group"><label>Приложение</label><input type="text" id="uploadBlueprintName" disabled></div>
+                <div class="form-group"><label>Тег версии (e.g., v1.2.1)</label><input type="text" name="version_tag" required placeholder="v1.0.0"></div>
+                <div class="form-group"><label>ZIP-архив с кодом</label><input type="file" name="zip_file" accept=".zip" required></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Загрузить</button></div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js" defer></script>
+</body>
+</html>
