@@ -1,0 +1,112 @@
+# --- ПОЛНЫЙ И ИСПРАВЛЕННЫЙ ФАЙЛ: app/routers/ssl.py ---
+
+import re
+import shutil
+import socket
+import asyncio
+import uuid
+from typing import List, Annotated
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Form, File, UploadFile, Depends, WebSocket
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from datetime import datetime
+
+from app.config import SSL_DIR
+from pydantic import BaseModel
+from app.schemas import IssueSSLRequest
+from app.services import nginx_manager
+from app.services.ws_manager import manager
+from app.services.ssl_service import perform_ssl_issuance
+# --- ИМПОРТЫ ДЛЯ АУТЕНТИФИКАЦИИ ---
+from app import security, models
+CurrentUser = Annotated[models.User, Depends(security.get_current_user)]
+
+router = APIRouter(prefix="/api/ssl", tags=["ssl"])
+http_client = httpx.AsyncClient(verify=False)
+
+class SSLCertificateInfo(BaseModel): name: str; subject: str; not_after: datetime
+class DnsCheckResponse(BaseModel): domain: str; server_ip: str | None; domain_ip: str | None; matches: bool; error: str | None
+
+# --- ЗАЩИЩАЕМ ЭНДПОИНТЫ ---
+@router.post("/issue")
+async def issue_ssl_certificate(request_data: IssueSSLRequest, current_user: CurrentUser):
+    domain = request_data.domain
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain): raise HTTPException(status_code=400, detail="Некорректный формат домена.")
+    task_id = str(uuid.uuid4())
+    asyncio.create_task(perform_ssl_issuance(task_id, domain))
+    return {"message": "Процесс выпуска сертификата запущен.", "task_id": task_id}
+
+# Websocket не защищаем, т.к. доступ к нему идет по уникальному task_id
+@router.websocket("/ws/issue-ssl/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    await manager.connect(websocket, task_id)
+    try:
+        while True: await websocket.receive_text()
+    except Exception:
+        manager.disconnect(task_id)
+
+@router.get("/check-dns", response_model=DnsCheckResponse)
+# ИСПРАВЛЕНИЕ: Перемещаем current_user перед domain=Query(...)
+async def check_domain_dns(current_user: CurrentUser, domain: str = Query(...)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(status_code=400, detail="Некорректный формат домена.")
+    server_ip=None; domain_ip=None; matches=False; error_message=None
+    try:
+        response = await http_client.get("https://api.ipify.org"); response.raise_for_status(); server_ip = response.text.strip()
+        loop = asyncio.get_running_loop(); addr_info = await loop.getaddrinfo(domain, None, family=socket.AF_INET); domain_ip = addr_info[0][4][0]
+        matches = (server_ip == domain_ip)
+    except httpx.RequestError as e: error_message = f"Не удалось получить публичный IP сервера. Ошибка сети: {e}"
+    except socket.gaierror: error_message = f"Не удалось найти A-запись для домена '{domain}'."
+    except Exception as e: error_message = f"Произошла ошибка при проверке DNS: {str(e)}"
+    return {"domain": domain, "server_ip": server_ip, "domain_ip": domain_ip, "matches": matches, "error": error_message}
+
+@router.get("/certificates", response_model=List[SSLCertificateInfo])
+async def list_ssl_certificates(current_user: CurrentUser):
+    certs_archive_dir = SSL_DIR / "archive"
+    if not certs_archive_dir.exists(): return []
+    certs = []
+    for item in certs_archive_dir.iterdir():
+        if item.is_dir():
+            try:
+                chain_files = sorted(list(item.glob("fullchain*.pem")), key=lambda p: int(re.search(r'(\d+)', p.name).group(1)))
+                if not chain_files: continue
+                cert_path = chain_files[-1]; cert_name = item.name
+                cert = x509.load_pem_x509_certificate(cert_path.read_bytes(), default_backend())
+                subject_cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+                certs.append(SSLCertificateInfo(name=cert_name, subject=subject_cn, not_after=cert.not_valid_after_utc))
+            except Exception as e: print(f"ERROR: Failed to parse certificate in archive {item.name}: {e}")
+    return sorted(certs, key=lambda c: c.name)
+
+@router.post("/certificates")
+# ИСПРАВЛЕНИЕ: Перемещаем current_user перед параметрами Form/File
+async def upload_ssl_certificate(current_user: CurrentUser, name: Annotated[str, Form()], cert_file: Annotated[UploadFile, File()], key_file: Annotated[UploadFile, File()]):
+    if not re.match(r"^[a-zA-Z0-9._-]+$", name): raise HTTPException(400, "Некорректное имя.")
+    cert_dir = SSL_DIR / name
+    if cert_dir.exists(): raise HTTPException(409, f"Сертификат '{name}' уже существует.")
+    try:
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_bytes(await cert_file.read())
+        (cert_dir / "privkey.pem").write_bytes(await key_file.read())
+        return {"message": f"Сертификат '{name}' успешно загружен."}
+    except Exception as e:
+        if cert_dir.exists(): shutil.rmtree(cert_dir)
+        raise HTTPException(500, f"Ошибка сохранения: {e}")
+
+@router.delete("/certificates/{cert_name}")
+async def delete_ssl_certificate(cert_name: str, current_user: CurrentUser):
+    # Здесь нет конфликта, так как cert_name (Path parameter) не является дефолтным
+    if not re.match(r"^[a-zA-Z0-9._-]+$", cert_name): raise HTTPException(400, "Некорректное имя.")
+    cert_dir_live = SSL_DIR / "live" / cert_name
+    cert_dir_archive = SSL_DIR / "archive" / cert_name
+    cert_dir_renewal = SSL_DIR / "renewal" / f"{cert_name}.conf"
+    if not cert_dir_live.is_dir(): raise HTTPException(404, f"Сертификат '{cert_name}' не найден.")
+    try:
+        if cert_dir_live.exists(): shutil.rmtree(cert_dir_live)
+        if cert_dir_archive.exists(): shutil.rmtree(cert_dir_archive)
+        if cert_dir_renewal.exists(): cert_dir_renewal.unlink()
+        nginx_manager.reload_nginx()
+        return {"message": f"Сертификат '{cert_name}' удален."}
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка удаления: {e}")

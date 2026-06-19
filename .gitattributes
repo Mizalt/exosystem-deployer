@@ -1,0 +1,14 @@
+# Нормализация концов строк. Критично для one-command install: install.sh должен
+# оставаться LF, иначе `curl | sh` на Linux падает (/bin/sh^M: bad interpreter).
+
+* text=auto eol=lf
+
+# Платформенно-зависимые скрипты:
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+
+# Не-текстовые файлы — не трогать концы строк:
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.zip  binary

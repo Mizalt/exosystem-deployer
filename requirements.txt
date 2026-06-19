@@ -1,0 +1,18 @@
+# Web framework
+fastapi==0.126.0
+uvicorn[standard]==0.38.0
+python-multipart==0.0.21
+
+# Database
+SQLAlchemy==2.0.45
+
+# Docker orchestration
+docker==7.1.0
+
+# Auth / security
+python-jose[cryptography]==3.5.0
+passlib==1.7.4
+bcrypt==4.0.1
+
+# Reverse-proxy client (proxy.py)
+httpx==0.28.1

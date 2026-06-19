@@ -1,0 +1,33 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- IDE / tooling ---
+.idea/
+.vscode/
+.claude/
+
+# --- Runtime data (НЕ коммитить: боевые данные, секреты, сертификаты) ---
+data/
+deployer.db
+deployer.db-journal
+uploads/
+ssl_certs/
+acme_challenge/
+nginx_configs/
+panel_settings.json
+*.log
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+secret.key
+
+# --- OS ---
+.DS_Store
+Thumbs.db
