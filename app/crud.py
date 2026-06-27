@@ -64,8 +64,37 @@ def create_blueprint(db: Session, blueprint: schemas.AppBlueprintCreate):
     db.refresh(db_blueprint)
     return db_blueprint
 
+def update_blueprint(db: Session, blueprint_id: int, data: schemas.AppBlueprintUpdate):
+    db_blueprint = get_blueprint(db, blueprint_id)
+    if not db_blueprint:
+        return None
+    payload = data.model_dump(exclude_unset=True)
+    for field, value in payload.items():
+        setattr(db_blueprint, field, value)
+    db.commit()
+    db.refresh(db_blueprint)
+    return db_blueprint
+
+def delete_blueprint(db: Session, blueprint_id: int):
+    db_blueprint = get_blueprint(db, blueprint_id)
+    if db_blueprint:
+        db.delete(db_blueprint)
+        db.commit()
+    return db_blueprint
+
 def get_artifact(db: Session, artifact_id: int):
     return db.query(models.Artifact).filter(models.Artifact.id == artifact_id).first()
+
+def delete_artifact(db: Session, artifact_id: int):
+    db_artifact = get_artifact(db, artifact_id)
+    if db_artifact:
+        db.delete(db_artifact)
+        db.commit()
+    return db_artifact
+
+def count_artifacts_by_hash(db: Session, zip_hash: str) -> int:
+    """Сколько артефактов ссылаются на один и тот же zip (дедупликация файлов)."""
+    return db.query(models.Artifact).filter(models.Artifact.zip_hash == zip_hash).count()
 
 def create_artifact(db: Session, artifact: schemas.ArtifactCreate):
     db_artifact = models.Artifact(**artifact.model_dump())
@@ -92,6 +121,7 @@ def get_deployments(db: Session, skip: int = 0, limit: int = 100):
 
 def create_deployment(db: Session, deployment_data: schemas.DeploymentCreate, blueprint_id: int):
     db_deployment = models.Deployment(
+        name=deployment_data.name,
         blueprint_id=blueprint_id,
         artifact_id=deployment_data.artifact_id,
         target_replicas=deployment_data.target_replicas,
@@ -101,6 +131,9 @@ def create_deployment(db: Session, deployment_data: schemas.DeploymentCreate, bl
     db.commit()
     db.refresh(db_deployment)
     return db_deployment
+
+def get_deployment_by_name(db: Session, name: str):
+    return db.query(models.Deployment).filter(models.Deployment.name == name).first()
 
 def delete_deployment(db: Session, deployment_id: int):
     db_dep = get_deployment(db, deployment_id)
@@ -129,6 +162,17 @@ def get_applications(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.Application).options(
         joinedload(models.Application.deployment).joinedload(models.Deployment.artifact)
     ).order_by(models.Application.name).offset(skip).limit(limit).all()
+
+def update_application(db: Session, app_id: int, data: schemas.ApplicationUpdate):
+    db_app = get_application(db, app_id)
+    if not db_app:
+        return None
+    payload = data.model_dump(exclude_unset=True)
+    for field, value in payload.items():
+        setattr(db_app, field, value)
+    db.commit()
+    db.refresh(db_app)
+    return db_app
 
 def create_application(db: Session, application: schemas.ApplicationCreate):
     dep_id = application.deployment_id or application.service_id
@@ -171,3 +215,32 @@ def create_app_user(db: Session, user: schemas.AppUserCreate, application_id: in
 
 def verify_password(plain_password, hashed_password):
     return security.verify_password(plain_password, hashed_password)
+
+
+# --- Подключение GitHub-аккаунта (ADR-033) ---
+
+def get_github_connection(db: Session):
+    return db.query(models.GithubConnection).first()
+
+
+def set_github_connection(db: Session, token_secret: str, login: str | None):
+    """Сохраняет (создаёт/перезаписывает) единственную GitHub-связку деплоера."""
+    conn = get_github_connection(db)
+    if conn:
+        conn.token_secret = token_secret
+        conn.login = login
+    else:
+        conn = models.GithubConnection(token_secret=token_secret, login=login)
+        db.add(conn)
+    db.commit()
+    db.refresh(conn)
+    return conn
+
+
+def delete_github_connection(db: Session) -> bool:
+    conn = get_github_connection(db)
+    if not conn:
+        return False
+    db.delete(conn)
+    db.commit()
+    return True

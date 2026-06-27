@@ -38,6 +38,60 @@ def test_blueprint_and_artifact(db):
     assert crud.get_artifact(db, art.id).zip_hash == "h1"
 
 
+def test_blueprint_update_and_delete(db):
+    bp = crud.create_blueprint(db, schemas.AppBlueprintCreate(name="old-name", description="old"))
+
+    updated = crud.update_blueprint(db, bp.id, schemas.AppBlueprintUpdate(description="new desc"))
+    assert updated.description == "new desc"
+    assert updated.name == "old-name"  # exclude_unset: имя не затёрто
+
+    renamed = crud.update_blueprint(db, bp.id, schemas.AppBlueprintUpdate(name="new-name"))
+    assert renamed.name == "new-name"
+
+    crud.delete_blueprint(db, bp.id)
+    assert crud.get_blueprint(db, bp.id) is None
+
+
+def test_artifact_delete_and_hash_count(db):
+    bp = crud.create_blueprint(db, schemas.AppBlueprintCreate(name="art"))
+    a1 = crud.create_artifact(db, schemas.ArtifactCreate(
+        version_tag="v1", zip_hash="dup", stored_zip_path="uploads/dup.zip", blueprint_id=bp.id
+    ))
+    a2 = crud.create_artifact(db, schemas.ArtifactCreate(
+        version_tag="v2", zip_hash="dup", stored_zip_path="uploads/dup.zip", blueprint_id=bp.id
+    ))
+    assert crud.count_artifacts_by_hash(db, "dup") == 2
+
+    crud.delete_artifact(db, a1.id)
+    assert crud.get_artifact(db, a1.id) is None
+    assert crud.count_artifacts_by_hash(db, "dup") == 1  # a2 ещё держит файл
+
+    crud.delete_artifact(db, a2.id)
+    assert crud.count_artifacts_by_hash(db, "dup") == 0
+
+
+def test_application_update_domain_and_ssl(db):
+    bp = crud.create_blueprint(db, schemas.AppBlueprintCreate(name="upd"))
+    art = crud.create_artifact(db, schemas.ArtifactCreate(
+        version_tag="v1", zip_hash="h", stored_zip_path="uploads/h.zip", blueprint_id=bp.id
+    ))
+    crud.create_group(db, schemas.AppGroupCreate(name="ug", start_port=6001, end_port=6003))
+    dep = crud.create_deployment(
+        db,
+        schemas.DeploymentCreate(target_replicas=1, group_name="ug", artifact_id=art.id),
+        blueprint_id=bp.id,
+    )
+    app_obj = crud.create_application(db, schemas.ApplicationCreate(
+        name="edit", domain="old.example.com", deployment_id=dep.id
+    ))
+
+    updated = crud.update_application(db, app_obj.id, schemas.ApplicationUpdate(
+        domain="new.example.com", ssl_cert_name="new.example.com"
+    ))
+    assert updated.domain == "new.example.com"
+    assert updated.ssl_cert_name == "new.example.com"
+
+
 # --------------------------------------------------------------------------- #
 #  Deployment
 # --------------------------------------------------------------------------- #

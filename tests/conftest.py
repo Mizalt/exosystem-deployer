@@ -6,11 +6,13 @@
 """
 import docker
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.database import Base
-from app import models
+from app.database import Base, get_db
+from app import models, security
 
 
 # --------------------------------------------------------------------------- #
@@ -99,3 +101,74 @@ class FakeDockerClient:
 @pytest.fixture
 def fake_docker():
     return FakeDockerClient()
+
+
+# --------------------------------------------------------------------------- #
+#  API (FastAPI TestClient) — общие для всех test_*.py, бьющих по эндпоинтам.
+#  БД подменяется на in-memory (StaticPool — общая на все сессии), аутентификация
+#  — через override зависимости. Lifespan НЕ запускается (TestClient без
+#  контекста), поэтому оркестратор/nginx не стартуют.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def api_env():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    import main  # импорт здесь, чтобы не было побочных эффектов на этапе сбора тестов
+    app = main.app
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield app, Session, TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def auth_client(api_env):
+    app, Session, client = api_env
+    fake = models.User(id=1, username="tester", hashed_password="x")
+    app.dependency_overrides[security.get_current_user] = lambda: fake
+    return client, Session
+
+
+# --------------------------------------------------------------------------- #
+#  Cloud (ЛК / контрол-плейн) TestClient — отдельное приложение + своя БД.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def cloud_env():
+    from app.cloud.database import CloudBase, get_cloud_db
+    from app.cloud.app import cloud_app
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    CloudBase.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    def override_get_cloud_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    cloud_app.dependency_overrides[get_cloud_db] = override_get_cloud_db
+    try:
+        yield cloud_app, Session, TestClient(cloud_app)
+    finally:
+        cloud_app.dependency_overrides.clear()

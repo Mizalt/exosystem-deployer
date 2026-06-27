@@ -5,7 +5,8 @@
 - **Backend:** Python 3.12, FastAPI, Uvicorn (образ деплоера — `Dockerfile`).
 - **БД:** SQLite (`data/deployer.db`) + самописные миграции (`app/database.py`).
   Всё изменяемое состояние деплоера — в каталоге `data/` (один том).
-- **Оркестрация:** `docker-py` (`docker.from_env()`) через смонтированный
+- **Оркестрация:** `docker-py` через единый клиент `app/environment.get_docker_client()`
+  (путь к сокету резолвит слой абстракции окружения, ADR-006) и смонтированный
   `/var/run/docker.sock`.
 - **Reverse-proxy / SSL:** Nginx + Certbot (Let's Encrypt) в отдельных контейнерах.
 - **Запуск:** `docker compose up -d --build` (deployer + nginx + certbot).

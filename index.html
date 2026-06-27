@@ -33,9 +33,8 @@
             <div class="logo"><span class="material-symbols-outlined">cloud_done</span><span>Cloud Deploy</span></div>
             <nav>
                 <div class="nav-item" data-page="dashboard"><span class="material-symbols-outlined">dashboard</span>Дашборд</div>
-                <div class="nav-item" data-page="blueprints"><span class="material-symbols-outlined">widgets</span>Библиотека</div>
-                <div class="nav-item active" data-page="services"><span class="material-symbols-outlined">dns</span>Сервисы</div>
-                <div class="nav-item" data-page="applications"><span class="material-symbols-outlined">public</span>Приложения</div>
+                <div class="nav-item active" data-page="pipeline"><span class="material-symbols-outlined">account_tree</span>Конвейер</div>
+                <div class="nav-group-label">Инфраструктура</div>
                 <div class="nav-item" data-page="ssl"><span class="material-symbols-outlined">shield_lock</span>SSL</div>
                 <div class="nav-item" data-page="settings"><span class="material-symbols-outlined">settings</span>Настройки</div>
             </nav>
@@ -56,13 +55,57 @@
         <div class="modal">
             <div class="modal-header"><h3 class="modal-title">Запустить новый сервис</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
             <form id="serviceForm">
-                <p style="font-size: 14px; color: var(--text-secondary); margin-bottom: 16px;">Сервис - это запущенный контейнер, доступный по внутреннему порту. Позже его можно будет опубликовать, создав Приложение.</p>
-                <div class="form-group"><label>1. Выберите приложение из библиотеки</label><select id="select_blueprint" required><option disabled selected>Загрузка...</option></select></div>
-                <div class="form-group"><label>2. Выберите версию (артефакт)</label><select id="select_artifact" name="artifact_id" required><option disabled selected>Выберите приложение</option></select></div>
-                <hr style="border-color: var(--border); margin: 20px 0;">
-                <div class="form-group"><label>3. Имя сервиса (уникальное, a-z, 0-9, -)</label><input type="text" name="name" required pattern="^[a-z0-9\\-]+$" placeholder="my-backend-service"></div>
-                <div class="form-group"><label>4. Группа портов</label><select name="group_name" required><option disabled selected>Загрузка...</option></select></div>
+                <p class="modal-intro">Сервис — это запущенный контейнер, доступный по внутреннему порту. Позже его можно будет опубликовать, создав Приложение.</p>
+                <div class="modal-cols">
+                    <div class="modal-col-main">
+                        <div class="form-group"><label>1. Выберите приложение из библиотеки</label><select id="select_blueprint" required><option disabled selected>Загрузка...</option></select></div>
+                        <div class="form-group"><label>2. Выберите версию (артефакт)</label><select id="select_artifact" name="artifact_id" required><option disabled selected>Выберите приложение</option></select></div>
+                        <div class="form-group"><label>3. Имя сервиса <span style="color:var(--text-secondary)">— можно оставить как есть</span></label><input type="text" name="name" pattern="^[a-z0-9\\-]+$" placeholder="сгенерируем из имени приложения"></div>
+                        <div class="form-group"><label>4. Группа портов</label><select name="group_name" required><option disabled selected>Загрузка...</option></select></div>
+                        <button type="button" class="advanced-toggle" data-toggle-advanced aria-expanded="false"><span class="material-symbols-outlined">tune</span><span class="advanced-toggle-text">Расширенные настройки сборки</span><span class="advanced-toggle-opt">необязательно</span><span class="material-symbols-outlined advanced-toggle-chevron">chevron_right</span></button>
+                    </div>
+                    <div class="modal-col-advanced">
+                        <div class="advanced-col-head"><span class="material-symbols-outlined">build</span>Расширенная сборка</div>
+                        <p class="advanced-hint">Для не-Python проектов или своего порта. Пусто → Python-автоген (uvicorn main:app) на порту 80. Свой <span class="mono">Dockerfile</span> из архива имеет приоритет. Порт <span class="mono">0</span> = воркер/бот без сетевого порта. БД (postgres/redis) — лучше свой Dockerfile.</p>
+                        <div class="build-presets">
+                            <span class="build-presets-label">Шаблон</span>
+                            <button type="button" class="preset-chip active" data-preset data-image="" data-cmd="" data-port="">Python</button>
+                            <button type="button" class="preset-chip" data-preset data-image="node:20-slim" data-cmd="node index.js" data-port="3000">Node.js</button>
+                            <button type="button" class="preset-chip" data-preset data-image="golang:1.22-alpine" data-cmd="go run ." data-port="8080">Go</button>
+                            <button type="button" class="preset-chip" data-preset data-image="ruby:3.3-slim" data-cmd="ruby app.rb" data-port="4567">Ruby</button>
+                        </div>
+                        <div class="form-group"><label>Базовый образ</label><input type="text" name="base_image" list="baseImageList" placeholder="python:3.12-slim (по умолчанию)" autocomplete="off"></div>
+                        <div class="form-group"><label>Команда запуска</label><input type="text" name="run_command" placeholder="напр. python bot.py · node index.js"></div>
+                        <div class="form-group"><label>Внутренний порт <span style="color:var(--text-secondary)">— 0 для воркера без порта</span></label><input type="number" name="internal_port" min="0" max="65535" placeholder="80"></div>
+                        <div class="form-group"><label>Env-переменные <span style="color:var(--text-secondary)">— KEY=VALUE по строке</span></label><textarea name="env_vars" rows="4" placeholder="DATABASE_URL=postgres://user:pass@db:5432/app&#10;DEBUG=1"></textarea></div>
+                    </div>
+                </div>
                 <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Запустить</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно НАСТРОЕК СБОРКИ/РАНТАЙМА сервиса (расширенный режим, Идея 2а) -->
+    <div class="modal-backdrop" id="configModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Настройки сборки и рантайма</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="configForm">
+                <input type="hidden" name="service_id">
+                <p class="advanced-hint">Применение пересоздаёт контейнер сервиса (короткий простой). Пусто → Python-автоген на порту 80. Свой <span class="mono">Dockerfile</span> из архива имеет приоритет. Порт <span class="mono">0</span> = воркер без сетевого порта.</p>
+                <div class="build-presets">
+                    <span class="build-presets-label">Шаблон</span>
+                    <button type="button" class="preset-chip" data-preset data-image="" data-cmd="" data-port="">Python</button>
+                    <button type="button" class="preset-chip" data-preset data-image="node:20-slim" data-cmd="node index.js" data-port="3000">Node.js</button>
+                    <button type="button" class="preset-chip" data-preset data-image="golang:1.22-alpine" data-cmd="go run ." data-port="8080">Go</button>
+                    <button type="button" class="preset-chip" data-preset data-image="ruby:3.3-slim" data-cmd="ruby app.rb" data-port="4567">Ruby</button>
+                </div>
+                <div class="form-group"><label>Базовый образ</label><input type="text" name="base_image" list="baseImageList" placeholder="python:3.12-slim" autocomplete="off"></div>
+                <div class="field-row">
+                    <div class="form-group"><label>Команда запуска</label><input type="text" name="run_command" placeholder="напр. node index.js"></div>
+                    <div class="form-group field-narrow"><label>Внутр. порт</label><input type="number" name="internal_port" min="0" max="65535" placeholder="80"></div>
+                </div>
+                <div class="form-group"><label>Env-переменные <span style="color:var(--text-secondary)">— KEY=VALUE по строке</span></label><textarea name="env_vars" rows="4" placeholder="DATABASE_URL=postgres://...&#10;DEBUG=1"></textarea></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Применить и пересоздать</button></div>
             </form>
         </div>
     </div>
@@ -76,7 +119,8 @@
                  <div class="form-group"><label>Сервис</label><input type="text" id="redeployServiceName" disabled></div>
                  <div class="form-group"><label>Текущая версия</label><input type="text" id="redeployCurrentVersion" disabled></div>
                  <hr style="border-color: var(--border); margin: 20px 0;">
-                 <div class="form-group"><label>Выберите новую версию для развертывания</label><select name="artifact_id" required><option disabled selected>Загрузка...</option></select></div>
+                 <div class="form-group"><label>Выберите версию <span style="color:var(--text-secondary)">— ↑ новее (обновление), ↓ старее (откат)</span></label><select name="artifact_id" required><option disabled selected>Загрузка...</option></select></div>
+                <div class="log-window" id="redeployLogWindow" style="display:none; height:200px; margin-top:12px;"></div>
                 <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Развернуть</button></div>
             </form>
         </div>
@@ -90,11 +134,61 @@
                  <p style="font-size: 14px; color: var(--text-secondary); margin-bottom: 16px;">Приложение - это публичная точка входа (домен), которая указывает на один из ваших запущенных сервисов.</p>
                 <div class="form-group"><label>1. Выберите сервис для публикации</label><select name="service_id" required><option disabled selected>Загрузка...</option></select></div>
                 <hr style="border-color: var(--border); margin: 20px 0;">
-                <div class="form-group"><label>2. Имя приложения (уникальное, a-z, 0-9, -)</label><input type="text" name="name" required pattern="^[a-z0--9\\-]+$" placeholder="my-public-app"></div>
-                <div class="form-group"><label>3. Домен</label><input type="text" name="domain" required placeholder="app.example.com"></div>
-                 <div class="form-group"><label>4. SSL Сертификат (необязательно)</label><select name="ssl_cert_name"><option value="">Без SSL (HTTP)</option></select></div>
+                <div class="form-group"><label>2. Имя приложения <span style="color:var(--text-secondary)">— можно оставить как есть</span></label><input type="text" name="name" pattern="^[a-z0-9\\-]+$" placeholder="сгенерируем из имени сервиса"></div>
+                <div class="form-group"><label>3. Домен</label><input type="text" name="domain" required placeholder="app.example.com" autocomplete="off"><div class="dns-inline" data-dns-for="appDomain"></div></div>
+                <div class="form-group">
+                    <label>4. SSL / HTTPS</label>
+                    <select name="ssl_mode" id="appSslMode">
+                        <option value="none">Без SSL (HTTP)</option>
+                        <option value="existing">Выбрать существующий сертификат</option>
+                        <option value="issue">Выпустить новый (Let's Encrypt)</option>
+                    </select>
+                </div>
+                <div class="form-group" id="appSslExistingGroup" style="display:none;">
+                    <label>Сертификат</label>
+                    <select name="ssl_cert_name"><option value="">—</option></select>
+                </div>
+                <div id="appSslIssueHint" style="display:none; margin-bottom:16px;">
+                    <div id="appDnsStatus" style="font-size:13px; color:var(--text-secondary);">Введите домен — проверим DNS перед выпуском.</div>
+                    <div class="log-window" id="appSslLogWindow" style="height:160px; display:none; margin-top:12px;"></div>
+                </div>
                 <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Опубликовать</button></div>
             </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно: СОЗДАНИЕ / РЕДАКТИРОВАНИЕ ПРИЛОЖЕНИЯ В БИБЛИОТЕКЕ (blueprint) -->
+    <div class="modal-backdrop" id="blueprintModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title" id="blueprintModalTitle">Создать приложение</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="blueprintForm">
+                <input type="hidden" name="blueprint_id">
+                <div class="form-group"><label>Имя приложения (уникальное, a-z, 0-9, -)</label><input type="text" name="name" required pattern="^[a-z0-9\\-]+$" placeholder="my-app"></div>
+                <div class="form-group"><label>Описание (необязательно)</label><input type="text" name="description" placeholder="Краткое описание"></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Сохранить</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно: РЕДАКТИРОВАНИЕ ПУБЛИКАЦИИ (домен / SSL) -->
+    <div class="modal-backdrop" id="editApplicationModal">
+        <div class="modal">
+            <div class="modal-header"><h3 class="modal-title">Редактировать приложение</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
+            <form id="editApplicationForm">
+                <input type="hidden" name="app_id">
+                <div class="form-group"><label>Имя приложения</label><input type="text" id="editAppName" disabled></div>
+                <div class="form-group"><label>Домен</label><input type="text" name="domain" required placeholder="app.example.com" autocomplete="off"><div class="dns-inline" data-dns-for="editAppDomain"></div></div>
+                <div class="form-group"><label>SSL Сертификат</label><select name="ssl_cert_name"><option value="">Без SSL (HTTP)</option></select></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Сохранить</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Боковая панель деталей элемента (popup) — используется дашбордом -->
+    <div class="drawer-backdrop" id="detailDrawer">
+        <div class="drawer">
+            <div class="drawer-header"><h3 class="drawer-title" id="drawerTitle">Детали</h3><button class="icon-btn" data-close-drawer><span class="material-symbols-outlined">close</span></button></div>
+            <div class="drawer-body" id="drawerBody"></div>
         </div>
     </div>
 
@@ -102,15 +196,45 @@
     <div class="modal-backdrop" id="uploadArtifactModal">
         <div class="modal">
             <div class="modal-header"><h3 class="modal-title">Загрузить новую версию</h3><button class="icon-btn" data-close-modal><span class="material-symbols-outlined">close</span></button></div>
-            <form id="uploadArtifactForm">
+            <form id="uploadArtifactForm" data-src="zip">
                 <input type="hidden" name="blueprint_id">
                 <div class="form-group"><label>Приложение</label><input type="text" id="uploadBlueprintName" disabled></div>
-                <div class="form-group"><label>Тег версии (e.g., v1.2.1)</label><input type="text" name="version_tag" required placeholder="v1.0.0"></div>
-                <div class="form-group"><label>ZIP-архив с кодом</label><input type="file" name="zip_file" accept=".zip" required></div>
-                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Загрузить</button></div>
+                <div class="tab-bar" id="uploadSrcTabs">
+                    <button type="button" class="tab active" data-src="zip"><span class="material-symbols-outlined">folder_zip</span>ZIP-архив</button>
+                    <button type="button" class="tab" data-src="github"><span class="material-symbols-outlined">code</span>Из GitHub</button>
+                </div>
+                <div class="source-panel active" data-src-panel="zip">
+                    <div class="form-group"><label>ZIP-архив с кодом</label><input type="file" name="zip_file" accept=".zip"></div>
+                </div>
+                <div class="source-panel" data-src-panel="github">
+                    <div class="form-group" id="githubRepoPickerGroup" style="display:none;">
+                        <label>Репозиторий (подключённый аккаунт)</label>
+                        <select id="githubRepoSelect"><option value="">— выбрать из списка —</option></select>
+                    </div>
+                    <div class="form-group"><label>URL репозитория</label><input type="text" name="repo_url" placeholder="https://github.com/owner/repo" autocomplete="off"></div>
+                    <div class="form-group"><label>Ветка / тег / SHA <span style="color:var(--text-secondary)">— опц., по умолчанию main</span></label><input type="text" name="ref" placeholder="main" autocomplete="off"></div>
+                    <p class="card-hint" style="margin-top:-4px;" id="githubSourceHint">Тянем код напрямую (без git). Публичные репозитории — без подключения; приватные — подключите GitHub в «Настройки → Интеграции». Если в репозитории есть свой <span class="mono">Dockerfile</span> — соберём по нему.</p>
+                </div>
+                <div class="form-group"><label>Тег версии <span style="color:var(--text-secondary)">— оставьте пустым для авто</span></label><input type="text" name="version_tag" placeholder="напр. v1.0.0 (подставим автоматически)"></div>
+                <div class="form-group"><label>Заметки к версии <span style="color:var(--text-secondary)">— подтянем из CHANGELOG</span></label><textarea name="description" rows="3" placeholder="Что изменилось в этой версии"></textarea></div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary deploy-action">Добавить версию</button></div>
             </form>
         </div>
     </div>
+
+    <!-- Подсказки базовых образов (общий список для модалок запуска и настроек сборки) -->
+    <datalist id="baseImageList">
+        <option value="python:3.12-slim"></option>
+        <option value="node:20-slim"></option>
+        <option value="golang:1.22-alpine"></option>
+        <option value="ruby:3.3-slim"></option>
+        <option value="php:8.3-apache"></option>
+        <option value="openjdk:21-slim"></option>
+        <option value="nginx:alpine"></option>
+        <option value="postgres:16-alpine"></option>
+        <option value="redis:7-alpine"></option>
+        <option value="mysql:8"></option>
+    </datalist>
 
     <script src="/static/js/app.js" defer></script>
 </body>

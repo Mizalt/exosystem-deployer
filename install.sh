@@ -41,15 +41,26 @@ fi
 # 4. Каталоги состояния (чтобы bind-mount'ы не создавались как папки от root)
 mkdir -p data uploads nginx_configs ssl_certs acme_challenge
 
-# 5. Подъём стека
-log "Собираю и запускаю стек (docker compose up -d --build) ..."
-docker compose up -d --build
+# 5. Первичный доступ: пока домен панели не задан, открываем порт деплоера наружу
+#    (firstrun-override), иначе панель за catchall-403 и домен задать негде (ADR-014).
+#    Если домен уже задан (повторная установка/обновление) — НЕ переоткрываем порт.
+COMPOSE_FILES="-f docker-compose.yml"
+FIRSTRUN=0
+if ! grep -q '"domain": *"[^"]' data/panel_settings.json 2>/dev/null; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.firstrun.yml"
+  FIRSTRUN=1
+fi
 
-# 6. Достаём одноразовый пароль администратора из логов
+# 6. Подъём стека
+log "Собираю и запускаю стек (docker compose up -d --build) ..."
+# shellcheck disable=SC2086
+docker compose $COMPOSE_FILES up -d --build
+
+# 7. Достаём одноразовый пароль администратора из логов
 log "Ожидаю инициализацию деплоера ..."
 i=0
 while [ "$i" -lt 30 ]; do
-  if docker compose logs deployer 2>/dev/null | grep -q "СОЗДАН АДМИНИСТРАТОР"; then
+  if docker compose $COMPOSE_FILES logs deployer 2>/dev/null | grep -q "СОЗДАН АДМИНИСТРАТОР"; then
     break
   fi
   i=$((i + 1)); sleep 1
@@ -57,9 +68,20 @@ done
 
 echo
 echo "=================================================================="
-docker compose logs deployer 2>/dev/null | grep -A5 "СОЗДАН АДМИНИСТРАТОР" || \
+docker compose $COMPOSE_FILES logs deployer 2>/dev/null | grep -A5 "СОЗДАН АДМИНИСТРАТОР" || \
   log "Администратор уже существовал (повторная установка)."
 echo "=================================================================="
-log "Готово. Задайте домен панели в настройках и откройте https://<домен>."
+
+# 8. Первичный доступ: как войти и как закрыть доступ после задания домена.
+if [ "$FIRSTRUN" -eq 1 ]; then
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  log "Первичный доступ к панели ОТКРЫТ по адресу:  http://${SERVER_IP:-<IP-сервера>}:7999"
+  log "Войдите, в «Настройки → Панель» задайте домен и выберите «Выпустить сертификат"
+  log "сейчас» — домен и HTTPS подключатся одним действием."
+  log "Затем ЗАКРОЙТЕ первичный доступ (порт 7999):"
+  log "    sh $INSTALL_DIR/close-initial-access.sh"
+else
+  log "Готово. Домен панели уже задан — откройте https://<ваш-домен>."
+fi
 log "Логи:    docker compose -f $INSTALL_DIR/docker-compose.yml logs -f deployer"
 log "Остановка: docker compose -f $INSTALL_DIR/docker-compose.yml down"

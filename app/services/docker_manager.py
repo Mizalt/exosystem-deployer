@@ -3,6 +3,8 @@
 import docker
 import zipfile
 import tempfile
+import hashlib
+import socket
 from pathlib import Path
 
 from app.environment import get_docker_client
@@ -12,26 +14,87 @@ from app.services.nginx_service import DEPLOYER_NETWORK, ensure_network
 client = get_docker_client()
 
 
-def generate_dockerfile(base_image="python:3.9-slim"):
-    """Генерирует Dockerfile с гарантированной установкой uvicorn и fastapi."""
-    return f"""
-FROM {base_image}
-WORKDIR /app
-COPY . .
-# Гарантируем установку uvicorn и fastapi, так как они используются в CMD по умолчанию
-RUN pip install --no-cache-dir uvicorn fastapi
-RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
-"""
+def generate_dockerfile(base_image="python:3.12-slim", run_command=None, internal_port=80):
+    """Генерирует Dockerfile под расширенный режим (Идея 2а, ADR-021).
+
+    - База `python:*` (по умолчанию) → ставим uvicorn/fastapi + requirements.txt
+      (прежнее удобство для питон-проектов). Иная база (node/go/…) → без pip:
+      только COPY + CMD (зависимости — на совести базы/команды/своего Dockerfile).
+    - `run_command` пусто → дефолтный uvicorn на `internal_port`; задано → CMD как
+      есть (shell-форма: 'python bot.py', 'gunicorn app:app -b 0.0.0.0:80').
+    - `internal_port` → EXPOSE и порт дефолтного uvicorn (убирает хардкод 80).
+    """
+    is_python = "python" in (base_image or "").lower()
+    lines = [f"FROM {base_image}", "WORKDIR /app", "COPY . ."]
+    if is_python:
+        # Гарантируем uvicorn/fastapi (используются дефолтным CMD) + requirements.
+        lines.append("RUN pip install --no-cache-dir uvicorn fastapi")
+        lines.append("RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi")
+    lines.append(f"EXPOSE {internal_port}")
+    if run_command:
+        lines.append(f"CMD {run_command}")
+    else:
+        lines.append(f'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{internal_port}"]')
+    return "\n".join(lines) + "\n"
 
 
-def deploy_service(zip_path: Path, deployment_name: str, port: int):
+# Версия стратегии сборки. Входит в ключ кэша образа, поэтому при изменении логики
+# сборки (generate_dockerfile / правила выбора Dockerfile) — бампнуть, чтобы кэш
+# инвалидировался и образы пересобрались. "v3" = база python:3.12 (3.9 ломала
+# современные requirements, напр. anyio>=4.13 требует py>=3.10). "v4" = расширенный
+# режим (база/команда/порт влияют на Dockerfile и входят в ключ кэша).
+BUILD_STRATEGY = "v4-advanced"
+
+# Репозиторий тегов образов, собираемых деплоером (content-addressed кэш).
+IMAGE_REPO = "deployer-cache"
+
+
+def compute_image_tag(base_key: str, build_config: dict = None) -> str:
+    """Детерминированный тег образа по (контент артефакта + стратегия + конфиг).
+
+    Единый источник правды формулы тега: используется и при сборке
+    (build_image_if_needed), и при уборке неиспользуемых образов
+    (prune_deployer_images) — чтобы «нужный» набор тегов точно совпадал с тем, что
+    реально собирается. См. ADR-021 (что входит в ключ) и ADR-025 (prune).
     """
-    Основная функция деплоя: строит образ и запускает контейнер.
-    Возвращает (container_id, container_name) или (None, None) в случае ошибки.
+    cfg = build_config or {}
+    cfg_sig = f"{cfg.get('base_image')}|{cfg.get('run_command')}|{cfg.get('internal_port')}"
+    cache_key = hashlib.sha256(f"{base_key}:{BUILD_STRATEGY}:{cfg_sig}".encode()).hexdigest()
+    return f"{IMAGE_REPO}:{cache_key[:32]}"
+
+
+def build_image_if_needed(zip_path: Path, image_cache_key: str = None, build_config: dict = None,
+                          on_line=None) -> str:
+    """Собирает образ из ZIP с КЭШЕМ по контенту (идемпотентность).
+
+    Образ адресуется по содержимому артефакта + версии стратегии сборки +
+    параметрам расширенного режима (`deployer-cache:<hash>`), а не по имени деплоя.
+    Если образ для этого контента уже собран — пропускаем сборку (раньше
+    `docker build` гонялся на каждый reconcile/реплику — лишняя работа).
+
+    Если в архиве есть СВОЙ `Dockerfile` — собираем по нему (поддержка не-Python
+    приложений, реальных GitHub-проектов); иначе генерируем по умолчанию с учётом
+    `build_config` (base_image/run_command/internal_port — Идея 2а, ADR-021).
+
+    `on_line` (опц.) — колбэк на каждую строку лога сборки: при его передаче сборка
+    идёт через low-level API со стримингом (живые WS-логи, ADR-023); иначе обычный
+    блокирующий build. Возвращает тег готового образа. При ошибке сборки поднимает
+    RuntimeError с логом (оркестратор сохранит его на Deployment для UI-диагностики).
     """
-    image_tag = f"deployer/{deployment_name}:latest"
-    container_name = f"deployer-{deployment_name}"
+    cfg = build_config or {}
+    # Content-addressed ключ: (zip_hash | хэш файла) + версия стратегии + параметры
+    # расширенного режима (влияют на генерируемый Dockerfile → должны инвалидировать
+    # кэш при изменении). Для своего Dockerfile из репо параметры в ключе безвредны
+    # (их смена вызовет редкую лишнюю пересборку — приемлемо).
+    base_key = image_cache_key or hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    image_tag = compute_image_tag(base_key, cfg)
+
+    try:
+        client.images.get(image_tag)
+        print(f"INFO: Image {image_tag} already built — skipping build (idempotent).")
+        return image_tag
+    except docker.errors.ImageNotFound:
+        pass
 
     with tempfile.TemporaryDirectory() as tmpdir:
         build_context = Path(tmpdir)
@@ -40,52 +103,125 @@ def deploy_service(zip_path: Path, deployment_name: str, port: int):
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(build_context)
 
-        # 2. Создаем Dockerfile
-        (build_context / "Dockerfile").write_text(generate_dockerfile())
+        # 2. Dockerfile: уважаем свой из репо, иначе генерируем питоновский дефолт.
+        dockerfile = build_context / "Dockerfile"
+        if dockerfile.exists():
+            print("INFO: Using Dockerfile from repository/archive.")
+        else:
+            dockerfile.write_text(generate_dockerfile(
+                base_image=cfg.get("base_image") or "python:3.12-slim",
+                run_command=cfg.get("run_command") or None,
+                internal_port=cfg.get("internal_port") or 80,
+            ))
+            print("INFO: No Dockerfile in archive — using generated default (advanced-mode aware).")
 
-        # 3. Билдим образ
+        # 3. Билдим образ. forcerm=True — удалять промежуточные контейнеры ДАЖЕ при
+        # неудачной сборке: иначе легаси-билдер оставляет контейнер упавшего шага,
+        # и при повторных попытках они копятся («флуд» остановленных контейнеров).
         print(f"INFO: Building image {image_tag}...")
-        try:
-            image, build_logs = client.images.build(path=str(build_context), tag=image_tag, rm=True)
-            for chunk in build_logs:
-                if 'stream' in chunk:
-                    print(chunk['stream'].strip())
-        except docker.errors.BuildError as e:
-            print(f"ERROR: Docker build failed: {e}")
-            for chunk in e.build_log:
-                if 'stream' in chunk:
-                    print(chunk['stream'].strip())
-            return None, None
+        if on_line is not None:
+            _build_image_streaming(build_context, image_tag, on_line)
+        else:
+            try:
+                client.images.build(path=str(build_context), tag=image_tag, rm=True, forcerm=True)
+            except docker.errors.BuildError as e:
+                print(f"ERROR: Docker build failed: {e}")
+                lines = []
+                for chunk in e.build_log:
+                    if 'stream' in chunk:
+                        s = chunk['stream'].rstrip()
+                        if s:
+                            print(s)
+                            lines.append(s)
+                # Поднимаем ошибку с логом сборки, чтобы оркестратор сохранил её на
+                # Deployment и UI показал причину, почему сервис «не запускается».
+                detail = "\n".join(lines[-60:]) if lines else str(e)
+                raise RuntimeError(f"Ошибка сборки образа:\n{detail}")
 
-        # 4. Останавливаем и удаляем старый контейнер с таким же именем, если он есть
-        try:
-            old_container = client.containers.get(container_name)
-            print(f"INFO: Stopping and removing old container {container_name}...")
-            old_container.stop()
-            old_container.remove(v=True)  # v=True удаляет анонимные тома
-        except docker.errors.NotFound:
-            pass  # Контейнера не было, это нормально
+    return image_tag
 
-        # 5. Запускаем новый контейнер в общей docker-сети.
-        # Host-порт НЕ публикуем: деплоер и nginx обращаются к контейнеру по имени
-        # на внутренний порт 80 внутри сети deployer-net. Это убирает исчерпание
-        # host-портов и делает модель кроссплатформенной (Linux/Windows).
-        ensure_network()
-        print(f"INFO: Running new container {container_name} in network {DEPLOYER_NETWORK} (logical port {port})...")
-        try:
-            container = client.containers.run(
-                image=image_tag,
-                name=container_name,
-                network=DEPLOYER_NETWORK,
-                detach=True,
-                restart_policy={"Name": "unless-stopped"},
-                labels={"manager": "cloud-deployer"}  # Метка для легкого поиска
-            )
-            print(f"SUCCESS: Container {container.short_id} started.")
-            return container.id, container_name
-        except Exception as e:
-            print(f"ERROR: Failed to run container: {e}")
-            return None, None
+
+def _build_image_streaming(build_context: Path, image_tag: str, on_line):
+    """Сборка через low-level Docker API со стримингом лога построчно в `on_line`
+    (живые WS-логи, ADR-023). low-level build НЕ кидает BuildError — ошибку отдаёт
+    как chunk {'error': ...}; ловим её и поднимаем RuntimeError с хвостом лога."""
+    log_lines: list[str] = []
+    error_text = None
+    for chunk in client.api.build(path=str(build_context), tag=image_tag, rm=True, forcerm=True, decode=True):
+        if 'stream' in chunk:
+            text = chunk['stream'].rstrip()
+            if text:
+                print(text)
+                log_lines.append(text)
+                on_line(text)
+        elif 'error' in chunk:
+            error_text = chunk['error'].rstrip()
+            print(f"ERROR: Docker build failed: {error_text}")
+            log_lines.append(error_text)
+            on_line(error_text)
+    if error_text is not None:
+        detail = "\n".join(log_lines[-60:])
+        raise RuntimeError(f"Ошибка сборки образа:\n{detail}")
+
+
+def is_app_responding(container_name: str, port: int = 80, timeout: float = 1.0) -> bool:
+    """Health-gate: проверяет, что приложение РЕАЛЬНО слушает порт (а не просто
+    контейнер 'running'). TCP-connect к контейнеру по имени в сети deployer-net.
+
+    TCP-коннект, а не HTTP-2xx: приложение может легитимно отвечать 404/401 на `/`,
+    но если порт открыт — процесс жив и принимает соединения. Используется
+    оркестратором перед пометкой реплики 'online'.
+    """
+    try:
+        with socket.create_connection((container_name, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_key: str = None,
+                   build_config: dict = None, env_vars: dict = None):
+    """
+    Основная функция деплоя: строит образ (с кэшем) и запускает контейнер.
+    `build_config` — параметры расширенного режима сборки (база/команда/порт);
+    `env_vars` — env-переменные рантайма, инжектятся в контейнер (Идея 2а, ADR-021).
+    Возвращает (container_id, container_name) или (None, None) в случае ошибки.
+    """
+    container_name = f"deployer-{deployment_name}"
+
+    # Идемпотентная сборка: образ переиспользуется между репликами/редеплоями.
+    image_tag = build_image_if_needed(zip_path, image_cache_key, build_config)
+
+    # Останавливаем и удаляем старый контейнер с таким же именем, если он есть
+    try:
+        old_container = client.containers.get(container_name)
+        print(f"INFO: Stopping and removing old container {container_name}...")
+        old_container.stop()
+        old_container.remove(v=True)  # v=True удаляет анонимные тома
+    except docker.errors.NotFound:
+        pass  # Контейнера не было, это нормально
+
+    # Запускаем новый контейнер в общей docker-сети.
+    # Host-порт НЕ публикуем: деплоер и nginx обращаются к контейнеру по имени
+    # на внутренний порт 80 внутри сети deployer-net. Это убирает исчерпание
+    # host-портов и делает модель кроссплатформенной (Linux/Windows).
+    ensure_network()
+    print(f"INFO: Running new container {container_name} in network {DEPLOYER_NETWORK} (logical port {port})...")
+    try:
+        container = client.containers.run(
+            image=image_tag,
+            name=container_name,
+            network=DEPLOYER_NETWORK,
+            detach=True,
+            restart_policy={"Name": "unless-stopped"},
+            environment=env_vars or None,  # env-переменные рантайма (Идея 2а)
+            labels={"manager": "cloud-deployer"}  # Метка для легкого поиска
+        )
+        print(f"SUCCESS: Container {container.short_id} started.")
+        return container.id, container_name
+    except Exception as e:
+        print(f"ERROR: Failed to run container: {e}")
+        return None, None
 
 
 def exec_in_container(container_name: str, cmd, user: str = "") -> tuple[int, str]:
@@ -176,6 +312,49 @@ def cleanup_orphan_containers(known_container_names) -> int:
     return removed
 
 
+def prune_deployer_images(wanted_tags) -> int:
+    """Удаляет образы `deployer-cache:*`, которые больше не нужны.
+
+    «Нужные» (`wanted_tags`) — теги текущих версий ВСЕХ деплоев (считаются вызывающим
+    через `compute_image_tag`). Остальные `deployer-cache`-образы — мусор от старых
+    версий/конфигов (редеплой/смена конфига оставляет прежний образ висеть) и
+    занимают диск. Без уборки за недели работы диск боевого сервера заполняется.
+
+    Безопасно: образ, занятый работающим контейнером, Docker удалить не даст
+    (conflict) — такой пропускаем. Если случайно удалить нужный образ, следующий
+    reconcile пересоберёт его (build идемпотентен) — потеря лишь в одной пересборке.
+    Возвращает число удалённых тегов. ADR-025.
+    """
+    wanted = set(wanted_tags or [])
+    removed = 0
+    try:
+        images = client.images.list(name=IMAGE_REPO)
+    except Exception as e:
+        print(f"ERROR: image prune: could not list images: {e}")
+        return 0
+
+    for image in images:
+        ours = [t for t in (image.tags or []) if t.startswith(f"{IMAGE_REPO}:")]
+        if not ours:
+            continue
+        # Если хотя бы один тег образа ещё нужен — образ целиком оставляем.
+        if any(t in wanted for t in ours):
+            continue
+        for tag in ours:
+            try:
+                client.images.remove(tag)
+                removed += 1
+            except docker.errors.APIError:
+                # Образ занят контейнером (conflict) или уже удалён — пропускаем.
+                pass
+            except Exception as e:
+                print(f"ERROR: image prune: could not remove {tag}: {e}")
+
+    if removed:
+        print(f"INFO: image prune: removed {removed} unused {IMAGE_REPO} image tag(s).")
+    return removed
+
+
 def get_running_deployment_containers():
     """Возвращает список ID контейнеров, управляемых нашим деплоером."""
     try:
@@ -219,18 +398,102 @@ def get_container_logs(container, tail=100) -> str:
 
 
 def get_container_stats(container) -> dict:
-    """Получает текущую статистику использования ресурсов контейнера."""
+    """Получает текущую статистику использования ресурсов контейнера.
+
+    Ключи cpu_percent/memory_usage_mb/memory_limit_mb сохранены для обратной
+    совместимости (их читает фронт в деталях сервиса); добавлены сетевые
+    счётчики net_rx_mb/net_tx_mb (суммарно по всем интерфейсам).
+    """
     try:
         stats = container.stats(stream=False)
-        cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
-        system_cpu_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
-        number_cpus = stats['cpu_stats'].get('online_cpus', len(stats['cpu_stats']['cpu_usage']['percpu_usage']))
+        cpu_stats = stats['cpu_stats']
+        cpu_delta = cpu_stats['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
+        system_cpu_delta = cpu_stats['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
+        # Число CPU: online_cpus (cgroup v2), иначе длина percpu_usage (cgroup v1).
+        # ВАЖНО: фолбэк считаем ЛЕНИВО — dict.get(k, default) вычисляет default всегда,
+        # а 'percpu_usage' в cgroup v2 отсутствует → раньше падало с KeyError.
+        number_cpus = cpu_stats.get('online_cpus')
+        if not number_cpus:
+            number_cpus = len(cpu_stats.get('cpu_usage', {}).get('percpu_usage') or []) or 1
         cpu_percent = (cpu_delta / system_cpu_delta) * number_cpus * 100.0 if system_cpu_delta > 0 else 0
         memory_usage_bytes = stats['memory_stats']['usage']
         memory_limit_bytes = stats['memory_stats']['limit']
         memory_usage_mb = round(memory_usage_bytes / (1024 * 1024), 2)
         memory_limit_mb = round(memory_limit_bytes / (1024 * 1024), 2)
-        return {"cpu_percent": round(cpu_percent, 2), "memory_usage_mb": memory_usage_mb, "memory_limit_mb": memory_limit_mb}
+        rx_bytes = tx_bytes = 0
+        for iface in (stats.get('networks') or {}).values():
+            rx_bytes += iface.get('rx_bytes', 0)
+            tx_bytes += iface.get('tx_bytes', 0)
+        return {
+            "cpu_percent": round(cpu_percent, 2),
+            "memory_usage_mb": memory_usage_mb,
+            "memory_limit_mb": memory_limit_mb,
+            "net_rx_mb": round(rx_bytes / (1024 * 1024), 2),
+            "net_tx_mb": round(tx_bytes / (1024 * 1024), 2),
+        }
     except Exception as e:
         print(f"ERROR: Could not get stats for container {container.name}: {e}")
-        return {"cpu_percent": 0, "memory_usage_mb": 0, "memory_limit_mb": 0}
+        return {"cpu_percent": 0, "memory_usage_mb": 0, "memory_limit_mb": 0, "net_rx_mb": 0, "net_tx_mb": 0}
+
+
+def get_system_metrics() -> dict:
+    """Сводные системные метрики для дашборда — только через Docker API
+    (без новых зависимостей, см. ADR-011).
+
+    Состоит из трёх блоков; каждый изолирован try/except, чтобы частичный сбой
+    (напр. медленный/недоступный df) не ронял весь ответ:
+    - host: факты хоста из client.info() (всего CPU/RAM, счётчики контейнеров/образов);
+    - disk: размеры из client.df() (образы/контейнеры/тома/build-cache);
+    - load: живая нагрузка — агрегат stats по managed-контейнерам
+      (label manager=cloud-deployer): суммарные CPU%/RAM/сеть.
+    """
+    host = {"ncpu": None, "mem_total_mb": None, "containers": None,
+            "containers_running": None, "containers_stopped": None,
+            "images": None, "server_version": None, "operating_system": None}
+    try:
+        info = client.info()
+        mem_total = info.get("MemTotal")
+        host.update({
+            "ncpu": info.get("NCPU"),
+            "mem_total_mb": round(mem_total / (1024 * 1024)) if mem_total else None,
+            "containers": info.get("Containers"),
+            "containers_running": info.get("ContainersRunning"),
+            "containers_stopped": info.get("ContainersStopped"),
+            "images": info.get("Images"),
+            "server_version": info.get("ServerVersion"),
+            "operating_system": info.get("OperatingSystem"),
+        })
+    except Exception as e:
+        print(f"WARNING: get_system_metrics: client.info() failed: {e}")
+
+    disk = {"images_mb": None, "containers_mb": None, "volumes_mb": None,
+            "build_cache_mb": None}
+    try:
+        df = client.df()
+        to_mb = lambda b: round((b or 0) / (1024 * 1024), 1)
+        disk["images_mb"] = to_mb(df.get("LayersSize"))
+        disk["containers_mb"] = to_mb(sum(c.get("SizeRw", 0) or 0 for c in (df.get("Containers") or [])))
+        disk["volumes_mb"] = to_mb(sum((v.get("UsageData") or {}).get("Size", 0) or 0 for v in (df.get("Volumes") or [])))
+        disk["build_cache_mb"] = to_mb(sum(bc.get("Size", 0) or 0 for bc in (df.get("BuildCache") or [])))
+    except Exception as e:
+        print(f"WARNING: get_system_metrics: client.df() failed: {e}")
+
+    load = {"cpu_percent": 0.0, "memory_usage_mb": 0.0,
+            "net_rx_mb": 0.0, "net_tx_mb": 0.0, "managed_running": 0}
+    try:
+        managed = client.containers.list(filters={"label": "manager=cloud-deployer"})
+        for container in managed:
+            s = get_container_stats(container)
+            load["cpu_percent"] += s.get("cpu_percent", 0) or 0
+            load["memory_usage_mb"] += s.get("memory_usage_mb", 0) or 0
+            load["net_rx_mb"] += s.get("net_rx_mb", 0) or 0
+            load["net_tx_mb"] += s.get("net_tx_mb", 0) or 0
+        load["managed_running"] = len(managed)
+        load["cpu_percent"] = round(load["cpu_percent"], 2)
+        load["memory_usage_mb"] = round(load["memory_usage_mb"], 2)
+        load["net_rx_mb"] = round(load["net_rx_mb"], 2)
+        load["net_tx_mb"] = round(load["net_tx_mb"], 2)
+    except Exception as e:
+        print(f"WARNING: get_system_metrics: managed-container load failed: {e}")
+
+    return {"host": host, "disk": disk, "load": load}

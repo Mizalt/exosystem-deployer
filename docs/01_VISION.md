@@ -47,13 +47,15 @@
 
 ## Целевой UX установки (north star)
 
+Идеал — короткий брендовый домен:
 ```bash
 # Linux
 curl -fsSL https://get.clouddeployer.io | sh
-
 # Windows (PowerShell)
 irm https://get.clouddeployer.io/install.ps1 | iex
 ```
+Сейчас установка идёт через GitHub (`raw.githubusercontent.com/.../install.sh`) —
+см. `07_DEPLOY.md`. Боевой тест на чистом Debian 11 пройден.
 
 После установки:
 1. Поднимается стек в контейнерах (deployer + nginx + certbot).

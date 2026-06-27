@@ -16,20 +16,28 @@ from pathlib import Path
 from typing import List, Annotated
 from contextlib import asynccontextmanager
 
+import uuid
+
+import httpx
 import uvicorn
 from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form,
-                     HTTPException, Response, UploadFile)
-from fastapi.responses import HTMLResponse, JSONResponse
+                     HTTPException, Response, UploadFile, WebSocket)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from starlette.staticfiles import StaticFiles
 
-from app import crud, schemas, panel_config, models, security, config, bootstrap
+from app import crud, schemas, panel_config, models, security, config, bootstrap, artifact_utils
+from app import github_client
 from app import environment
+from app import editions
+from app import run_config
+from app import security_headers
 from app.environment import get_docker_client
 from app.database import get_db, init_db_with_migrations, SessionLocal
 from app.routers import proxy, ssl, panel, auth
-from app.services import docker_manager, nginx_manager, nginx_service
+from app.services import docker_manager, nginx_manager, nginx_service, build_service
+from app.services.ws_manager import manager as ws_manager
 
 import asyncio
 from app.services.orchestrator import run_orchestrator_loop
@@ -45,6 +53,7 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 async def lifespan(app: FastAPI):
     print("--- Running startup tasks ---")
     print(f"INFO: Environment: {environment.describe()}")
+    print(f"INFO: Edition: {editions.get_edition()}")
     init_db_with_migrations()
 
     # Онбординг: при первом запуске создаём администратора (без ручного create_admin.py).
@@ -97,6 +106,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Cloud Deploy Panel", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Заголовки безопасности на ответы панели (не на проксируемые приложения)."""
+    response = await call_next(request)
+    if security_headers.should_apply(request.url.path):
+        for key, value in security_headers.SECURITY_HEADERS.items():
+            response.headers.setdefault(key, value)
+    return response
+
+
 app.include_router(ssl.router)
 app.include_router(proxy.router)
 app.include_router(panel.router)
@@ -113,6 +133,12 @@ async def read_root():
         return HTMLResponse(content=f.read())
 
 
+@app.get("/api/edition", tags=["System"])
+def get_edition(current_user: CurrentUser):
+    """Текущее издание и доступность фич (open-core: oss/pro/cloud). См. ADR-019."""
+    return editions.describe()
+
+
 # === СОВМЕСТИМОСТЬ С СЕРВИСАМИ ДЛЯ ФРОНТЕНДА (/api/services) ===
 
 @app.get("/api/services", tags=["Services Compatibility Layer"])
@@ -124,20 +150,59 @@ def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)
         first_instance = dep.instances[0] if dep.instances else None
         port = first_instance.assigned_port if first_instance else 0
         status = first_instance.status if first_instance else "offline"
+        online_count = sum(1 for i in dep.instances if i.status == "online")
 
         services.append({
             "id": dep.id,
-            "name": dep.blueprint.name,
+            "name": dep.name or dep.blueprint.name,
+            "blueprint_name": dep.blueprint.name,
             "assigned_port": port,
             "status": status,
+            # Реплики: желаемое (target) и сколько реально online — для UI-индикатора
+            # «N/N online» и контрола масштабирования (Идея 5 фаза 1).
+            "target_replicas": dep.target_replicas,
+            "online_count": online_count,
+            "instances_count": len(dep.instances),
+            # Расширенный режим сборки/рантайма (Идея 2а) — для UI-редактора конфига.
+            "internal_port": run_config.effective_port(dep.internal_port),
+            "run_command": dep.run_command,
+            "base_image": dep.base_image,
+            "env_vars": run_config.env_from_json(dep.env_vars),
             "artifact": {
                 "id": dep.artifact.id,
                 "version_tag": dep.artifact.version_tag,
                 "blueprint_id": dep.blueprint_id,
                 "created_at": dep.artifact.created_at.isoformat() if dep.artifact.created_at else None
-            }
+            },
+            # Связанные публикации — чтобы UI мог дать «Открыть» (через прокси-роут).
+            "applications": [
+                {"id": a.id, "name": a.name, "domain": a.domain, "ssl": bool(a.ssl_cert_name)}
+                for a in dep.applications
+            ],
         })
     return services
+
+
+def _apply_run_config(dep, data: dict):
+    """Применяет поля расширенного режима (Идея 2а) к Deployment из входного dict.
+
+    Затрагивает только переданные ключи (частичное обновление), не коммитит.
+    Валидирует internal_port. Пустые строки → None (вернуться к автогену/дефолту).
+    """
+    if data.get("internal_port") is not None and data.get("internal_port") != "":
+        try:
+            port = int(data["internal_port"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="internal_port должен быть числом")
+        if port < 0 or port > 65535:
+            raise HTTPException(status_code=400, detail="internal_port вне диапазона 0..65535")
+        dep.internal_port = port
+    if "run_command" in data:
+        dep.run_command = (data.get("run_command") or "").strip() or None
+    if "base_image" in data:
+        dep.base_image = (data.get("base_image") or "").strip() or None
+    if "env_vars" in data:
+        dep.env_vars = run_config.env_to_json(data.get("env_vars"))
 
 
 @app.post("/api/services", tags=["Services Compatibility Layer"])
@@ -152,16 +217,37 @@ def create_service_compat(service_data: dict, current_user: CurrentUser, db: Ses
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
+    # Имя сервиса: пусто → автоген из имени приложения (с суффиксом при коллизии);
+    # задано вручную → требуем уникальности (иначе 409).
+    requested_name = (service_data.get("name") or "").strip()
+    if requested_name:
+        if crud.get_deployment_by_name(db, requested_name):
+            raise HTTPException(status_code=409, detail=f"Сервис с именем '{requested_name}' уже существует.")
+        service_name = requested_name
+    else:
+        base = artifact.blueprint.name
+        service_name = base
+        i = 2
+        while crud.get_deployment_by_name(db, service_name):
+            service_name = f"{base}-{i}"
+            i += 1
+
     dep_data = schemas.DeploymentCreate(
+        name=service_name,
         artifact_id=artifact_id,
         target_replicas=1,
         group_name=group_name
     )
     dep = crud.create_deployment(db, dep_data, blueprint_id=artifact.blueprint_id)
 
+    # Расширенный режим (Идея 2а): опц. база/команда/порт/env. Пусто → питоновский
+    # автоген на порту 80 (прежнее поведение). Применяем сразу при создании.
+    _apply_run_config(dep, service_data)
+    db.commit()
+
     return {
         "id": dep.id,
-        "name": dep.blueprint.name,
+        "name": dep.name or dep.blueprint.name,
         "assigned_port": 0,
         "status": "starting",
         "artifact": {
@@ -208,6 +294,48 @@ def restart_service_compat(service_id: int, current_user: CurrentUser, db: Sessi
     return {"message": "Service restarted"}
 
 
+@app.patch("/api/services/{service_id}/config", tags=["Services Compatibility Layer"])
+def update_service_config_compat(service_id: int, data: dict, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Меняет расширенный конфиг сборки/рантайма (база/команда/порт/env, Идея 2а) и
+    ПЕРЕСОЗДАЁТ реплики, чтобы применить (новый образ и env задаются при запуске
+    контейнера). Сбрасывает build-backoff — даём сборке новый шанс."""
+    dep = crud.get_deployment(db, service_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Service not found")
+    _apply_run_config(dep, data)
+    # Build-first (ADR-022): собираем образ с НОВЫМ конфигом ДО сноса реплик и свапаем
+    # только при успехе. Провал → откат изменений конфига (db.rollback), сервис не тронут.
+    try:
+        build_service.build_first_swap(db, dep, dep.artifact)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Сборка с новым конфигом не удалась — сервис не изменён.\n{e}")
+    db.commit()
+    return {
+        "message": "Конфиг применён, сервис пересоздаётся.",
+        "internal_port": run_config.effective_port(dep.internal_port),
+        "run_command": dep.run_command,
+        "base_image": dep.base_image,
+        "env_vars": run_config.env_from_json(dep.env_vars),
+    }
+
+
+@app.post("/api/services/{service_id}/scale", tags=["Services Compatibility Layer"])
+def scale_service_compat(service_id: int, data: schemas.DeploymentScaleRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Меняет желаемое число реплик (Идея 5 фаза 1). Оркестратор сам приведёт
+    действительное состояние к target_replicas (scale up/down). Балансировка между
+    репликами — round-robin в proxy.py. Только для stateless-сервисов."""
+    dep = crud.get_deployment(db, service_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Service not found")
+    n = data.target_replicas
+    if n < 0 or n > 20:
+        raise HTTPException(status_code=400, detail="target_replicas должно быть в диапазоне 0..20")
+    dep.target_replicas = n
+    db.commit()
+    return {"message": f"Цель — {n} реплик(и)", "target_replicas": n}
+
+
 @app.post("/api/services/{service_id}/redeploy", tags=["Services Compatibility Layer"])
 def redeploy_service_compat(service_id: int, data: dict, current_user: CurrentUser, db: Session = Depends(get_db)):
     dep = crud.get_deployment(db, service_id)
@@ -222,20 +350,44 @@ def redeploy_service_compat(service_id: int, data: dict, current_user: CurrentUs
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    dep.artifact_id = artifact_id
-
-    client = get_docker_client()
-    for inst in dep.instances:
-        try:
-            container = client.containers.get(inst.container_name)
-            container.stop()
-            container.remove(v=True)
-        except Exception:
-            pass
-        db.delete(inst)
-
+    # Build-first (ADR-022): собираем образ НОВОЙ версии ДО сноса работающих реплик и
+    # свапаем только при успехе. Провал → откат смены версии, работающий сервис не тронут
+    # (DoD «неудачные деплои не ломают работающий сервис»).
+    try:
+        build_service.build_first_swap(db, dep, artifact)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Сборка новой версии не удалась — сервис не тронут.\n{e}")
     db.commit()
     return {"message": "Service redeployed"}
+
+
+@app.post("/api/services/{service_id}/redeploy-stream", tags=["Services Compatibility Layer"])
+async def redeploy_stream_start(service_id: int, data: dict, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Запускает редеплой на новую версию с ЖИВЫМ WS-логом сборки (ADR-023). Возвращает
+    task_id; фронт открывает /api/services/ws/redeploy/{task_id} и читает лог. Сама
+    сборка/свап идут в фоне (build-first + атомарность сохранены)."""
+    dep = crud.get_deployment(db, service_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Service not found")
+    artifact_id = data.get("artifact_id")
+    artifact = crud.get_artifact(db, artifact_id) if artifact_id else None
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    task_id = str(uuid.uuid4())
+    asyncio.create_task(build_service.perform_streaming_redeploy(task_id, dep.id, artifact.id))
+    return {"task_id": task_id}
+
+
+# WS не защищаем токеном — доступ по непредсказуемому task_id (как у выпуска SSL).
+@app.websocket("/api/services/ws/redeploy/{task_id}")
+async def redeploy_ws(websocket: WebSocket, task_id: str):
+    await ws_manager.connect(websocket, task_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        ws_manager.disconnect(task_id)
 
 
 @app.delete("/api/services/{service_id}", status_code=204, tags=["Services Compatibility Layer"])
@@ -266,18 +418,47 @@ def delete_service_compat(service_id: int, current_user: CurrentUser, db: Sessio
 
 @app.get("/api/services/{service_id}/logs", tags=["Services Compatibility Layer"])
 def get_service_logs_compat(service_id: int, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Логи + диагностика сервиса — для понимания, почему он умер/не запускается.
+
+    Работает и для НЕ запущенных контейнеров: у остановленного (failed) контейнера
+    логи краша сохраняются Docker'ом; если контейнер уже удалён — отдаём снимок
+    логов, снятый оркестратором в момент отказа (`Instance.last_logs`). Если
+    контейнер вовсе не создан из-за ошибки сборки — отдаём лог сборки с Deployment.
+    """
     dep = crud.get_deployment(db, service_id)
-    if not dep or not dep.instances:
-        return JSONResponse(content={"logs": "Нет активных экземпляров."})
+    if not dep:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    if not dep.instances:
+        if dep.last_build_log:
+            return JSONResponse(content={
+                "logs": dep.last_build_log, "status": "build_failed",
+                "exit_code": None, "restart_count": 0,
+            })
+        return JSONResponse(content={
+            "logs": "Контейнер ещё не создан или сервис остановлен.",
+            "status": "offline", "exit_code": None, "restart_count": 0,
+        })
 
     inst = dep.instances[0]
+    payload = {
+        "status": inst.status, "exit_code": inst.exit_code,
+        "restart_count": inst.restart_count or 0, "logs": "",
+    }
     try:
         client = get_docker_client()
         container = client.containers.get(inst.container_name)
-        logs = docker_manager.get_container_logs(container)
-        return JSONResponse(content={"logs": logs})
-    except Exception as e:
-        return JSONResponse(content={"logs": f"Не удалось получить логи: {e}"})
+        try:
+            container.reload()
+            if payload["exit_code"] is None:
+                payload["exit_code"] = container.attrs.get("State", {}).get("ExitCode")
+        except Exception:
+            pass
+        payload["logs"] = docker_manager.get_container_logs(container, tail=200)
+    except Exception:
+        # Контейнер недоступен/удалён — отдаём сохранённый при падении снимок.
+        payload["logs"] = inst.last_logs or "Логи недоступны (контейнер удалён)."
+    return JSONResponse(content=payload)
 
 
 @app.get("/api/services/{service_id}/stats", tags=["Services Compatibility Layer"])
@@ -296,6 +477,22 @@ def get_service_stats_compat(service_id: int, current_user: CurrentUser, db: Ses
         return JSONResponse(content={"cpu_percent": 0, "memory_usage_mb": 0, "memory_limit_mb": 0})
 
 
+# === Системные метрики (для дашборда) ===
+
+@app.get("/api/system/metrics", tags=["System"])
+def get_system_metrics(current_user: CurrentUser):
+    """Сводные метрики хоста/Docker/нагрузки для дашборда.
+
+    Устойчив к сбою Docker: всегда отдаёт 200 с null/нулевыми полями, чтобы
+    дашборд не падал при недоступности демона.
+    """
+    try:
+        return docker_manager.get_system_metrics()
+    except Exception as e:
+        print(f"ERROR: get_system_metrics endpoint failed: {e}")
+        return {"host": {}, "disk": {}, "load": {}}
+
+
 # === УРОВЕНЬ 1: API для Библиотеки (Blueprints & Artifacts) ===
 
 @app.get("/api/blueprints", response_model=List[schemas.AppBlueprint], tags=["Level 1: Blueprints"])
@@ -310,28 +507,115 @@ def create_blueprint(blueprint: schemas.AppBlueprintCreate, current_user: Curren
     return crud.create_blueprint(db, blueprint)
 
 
-@app.post("/api/blueprints/{blueprint_id}/artifacts", response_model=schemas.Artifact, tags=["Level 1: Blueprints"])
-async def upload_artifact(
+@app.patch("/api/blueprints/{blueprint_id}", response_model=schemas.AppBlueprint, tags=["Level 1: Blueprints"])
+def update_blueprint(blueprint_id: int, data: schemas.AppBlueprintUpdate, current_user: CurrentUser, db: Session = Depends(get_db)):
+    bp = crud.get_blueprint(db, blueprint_id)
+    if not bp:
+        raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
+    if data.name and data.name != bp.name:
+        existing = crud.get_blueprint_by_name(db, data.name)
+        if existing and existing.id != blueprint_id:
+            raise HTTPException(status_code=400, detail="Приложение с таким именем уже существует.")
+    return crud.update_blueprint(db, blueprint_id, data)
+
+
+@app.delete("/api/blueprints/{blueprint_id}", status_code=204, tags=["Level 1: Blueprints"])
+def delete_blueprint(blueprint_id: int, current_user: CurrentUser, db: Session = Depends(get_db)):
+    bp = crud.get_blueprint(db, blueprint_id)
+    if not bp:
+        raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
+
+    if bp.deployments:
+        names = ", ".join(sorted({d.blueprint.name for d in bp.deployments}))
+        raise HTTPException(
+            status_code=409,
+            detail=f"Нельзя удалить: есть запущенные сервисы на этом приложении ({names}). "
+                   f"Сначала удалите сервисы."
+        )
+
+    crud.delete_blueprint(db, blueprint_id)
+    return Response(status_code=204)
+
+
+@app.delete("/api/blueprints/{blueprint_id}/artifacts/{artifact_id}", status_code=204, tags=["Level 1: Blueprints"])
+def delete_artifact(blueprint_id: int, artifact_id: int, current_user: CurrentUser, db: Session = Depends(get_db)):
+    artifact = crud.get_artifact(db, artifact_id)
+    if not artifact or artifact.blueprint_id != blueprint_id:
+        raise HTTPException(status_code=404, detail="Версия (артефакт) не найдена.")
+
+    if artifact.deployments:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Нельзя удалить версию '{artifact.version_tag}': она используется "
+                   f"запущенным сервисом. Сначала обновите или удалите сервис."
+        )
+
+    zip_hash = artifact.zip_hash
+    crud.delete_artifact(db, artifact_id)
+
+    # Удаляем файл только если на этот zip больше никто не ссылается (дедупликация по hash).
+    if crud.count_artifacts_by_hash(db, zip_hash) == 0:
+        zip_path = UPLOADS_DIR / f"{zip_hash}.zip"
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"WARNING: не удалось удалить файл артефакта {zip_path}: {e}")
+
+    return Response(status_code=204)
+
+
+@app.post("/api/blueprints/{blueprint_id}/artifacts/inspect", tags=["Level 1: Blueprints"])
+async def inspect_artifact_zip(
         blueprint_id: int,
-        version_tag: Annotated[str, Form()],
         zip_file: Annotated[UploadFile, File()],
         current_user: CurrentUser, db: Session = Depends(get_db)
 ):
-    if not crud.get_blueprint(db, blueprint_id):
+    """Подсказки для формы загрузки версии: предлагаемый тег и описание из ZIP.
+
+    Не сохраняет артефакт — только инспектирует архив и считает следующий тег.
+    """
+    bp = crud.get_blueprint(db, blueprint_id)
+    if not bp:
         raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
 
     content = await zip_file.read()
+    meta = artifact_utils.inspect_zip(content)
+    existing_tags = [a.version_tag for a in bp.artifacts]
+    suggested = meta.get("version") or artifact_utils.suggest_next_version(existing_tags)
+    return {"suggested_version": suggested, "description": meta.get("description")}
+
+
+# Максимальный размер импортируемого архива (защита от OOM при импорте из GitHub).
+MAX_IMPORT_BYTES = 150 * 1024 * 1024  # 150 MB
+
+
+def _create_artifact_from_zip_bytes(db, bp, content: bytes, version_tag: str, description: str):
+    """Сохраняет ZIP-байты как версию (артефакт): хэш+дедуп, авто-фолбэки тега/описания.
+
+    Общий путь для загрузки ZIP и импорта из GitHub (tarball → zip).
+    """
     zip_hash = hashlib.sha256(content).hexdigest()
     stored_zip_path = UPLOADS_DIR / f"{zip_hash}.zip"
-
     if not stored_zip_path.exists():
         stored_zip_path.write_bytes(content)
 
+    # Авто-фолбэки: если поля пустые — тянем из ZIP / генерируем следующий тег.
+    version_tag = (version_tag or "").strip()
+    description = (description or "").strip()
+    if not version_tag or not description:
+        meta = artifact_utils.inspect_zip(content)
+        if not version_tag:
+            existing_tags = [a.version_tag for a in bp.artifacts]
+            version_tag = meta.get("version") or artifact_utils.suggest_next_version(existing_tags)
+        if not description:
+            description = meta.get("description") or ""
+
     artifact_data = schemas.ArtifactCreate(
         version_tag=version_tag,
+        description=description or None,
         zip_hash=zip_hash,
         stored_zip_path=stored_zip_path.as_posix(),  # forward-slash: кроссплатформенно (Linux-контейнер)
-        blueprint_id=blueprint_id
+        blueprint_id=bp.id,
     )
     try:
         return crud.create_artifact(db, artifact_data)
@@ -341,6 +625,159 @@ async def upload_artifact(
             status_code=409,
             detail=f"Версия с тегом '{version_tag}' уже существует для этого приложения."
         )
+
+
+@app.post("/api/blueprints/{blueprint_id}/artifacts", response_model=schemas.Artifact, tags=["Level 1: Blueprints"])
+async def upload_artifact(
+        blueprint_id: int,
+        zip_file: Annotated[UploadFile, File()],
+        current_user: CurrentUser, db: Session = Depends(get_db),
+        version_tag: Annotated[str, Form()] = "",
+        description: Annotated[str, Form()] = "",
+):
+    bp = crud.get_blueprint(db, blueprint_id)
+    if not bp:
+        raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
+
+    content = await zip_file.read()
+    return _create_artifact_from_zip_bytes(db, bp, content, version_tag, description)
+
+
+@app.get("/api/blueprints/{blueprint_id}/artifacts/{artifact_id}/download", tags=["Level 1: Blueprints"])
+def download_artifact(blueprint_id: int, artifact_id: int, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Отдаёт загруженный ZIP версии для скачивания (под auth)."""
+    artifact = crud.get_artifact(db, artifact_id)
+    if not artifact or artifact.blueprint_id != blueprint_id:
+        raise HTTPException(status_code=404, detail="Версия не найдена.")
+    path = Path(artifact.stored_zip_path.replace("\\", "/"))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Файл артефакта отсутствует на диске.")
+    filename = f"{artifact.blueprint.name}-{artifact.version_tag}.zip"
+    return FileResponse(path, media_type="application/zip", filename=filename)
+
+
+@app.post("/api/blueprints/{blueprint_id}/artifacts/from-github", response_model=schemas.Artifact, tags=["Level 1: Blueprints"])
+async def import_artifact_from_github(
+        blueprint_id: int,
+        data: schemas.GithubImportRequest,
+        current_user: CurrentUser, db: Session = Depends(get_db),
+):
+    """Импортирует версию из GitHub-репозитория по URL.
+
+    Тянет codeload-tarball (без git-бинарника), конвертирует в наш ZIP-формат и
+    сохраняет как версию. Публичные репо работают без подключения; для приватных —
+    подключите GitHub-аккаунт (`/api/integrations/github`, ADR-033) — токен
+    добавится в запрос автоматически.
+    """
+    bp = crud.get_blueprint(db, blueprint_id)
+    if not bp:
+        raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
+
+    parsed = artifact_utils.parse_github_repo(data.repo_url)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Не похоже на ссылку GitHub-репозитория.")
+    owner, repo, ref_from_url = parsed
+
+    # Порядок проб ref: явный из формы → из /tree/<ref> → main → master.
+    refs_to_try, seen = [], set()
+    for r in (data.ref, ref_from_url, "main", "master"):
+        r = (r or "").strip()
+        if r and r not in seen:
+            seen.add(r)
+            refs_to_try.append(r)
+
+    # Если GitHub-аккаунт подключён — добавляем токен (нужен для приватных репо;
+    # для публичных не мешает и снимает rate-limit анонимных запросов codeload).
+    headers = {}
+    gh_conn = crud.get_github_connection(db)
+    if gh_conn:
+        from app.secret_box import get_secret_box
+        headers["Authorization"] = f"Bearer {get_secret_box().open(gh_conn.token_secret)}"
+
+    tar_bytes, used_ref = None, None
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
+        for ref in refs_to_try:
+            url = f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}"
+            try:
+                resp = await http.get(url, headers=headers)
+            except httpx.HTTPError:
+                continue
+            if resp.status_code == 200:
+                tar_bytes, used_ref = resp.content, ref
+                break
+
+    if tar_bytes is None:
+        hint = ("Убедитесь, что репозиторий публичный, или подключите GitHub-аккаунт "
+                "для доступа к приватным." if not gh_conn else
+                "Проверьте права токена на этот репозиторий (Repository access).")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Репозиторий или ветка не найдены (пробовал: {', '.join(refs_to_try)}). {hint}"
+        )
+    if len(tar_bytes) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="Архив репозитория слишком большой (>150 МБ).")
+
+    try:
+        content = artifact_utils.tarball_to_zip(tar_bytes)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Не удалось распаковать архив репозитория.")
+
+    # Если тег не задан — пусть хелпер возьмёт из VERSION или авто-бампнет (ref вроде
+    # 'main' плохой тег версии; явный тег/файл VERSION предпочтительнее).
+    return _create_artifact_from_zip_bytes(db, bp, content, data.version_tag, data.description)
+
+
+# --- Подключение GitHub-аккаунта (ADR-033): приватные репо в Библиотеке ---
+
+@app.get("/api/integrations/github", response_model=schemas.GithubConnectionStatus, tags=["Integrations"])
+def get_github_integration(current_user: CurrentUser, db: Session = Depends(get_db)):
+    conn = crud.get_github_connection(db)
+    if not conn:
+        return schemas.GithubConnectionStatus(connected=False)
+    from app.secret_box import get_secret_box
+    token = get_secret_box().open(conn.token_secret)
+    return schemas.GithubConnectionStatus(
+        connected=True, login=conn.login, masked_token=get_secret_box().mask(token))
+
+
+@app.post("/api/integrations/github", response_model=schemas.GithubConnectionStatus, tags=["Integrations"])
+async def connect_github_integration(
+        data: schemas.GithubConnectionIn,
+        current_user: CurrentUser, db: Session = Depends(get_db),
+):
+    """Проверяет PAT на живом API и сохраняет его зашифрованным (`SecretBox`)."""
+    token = data.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Токен не может быть пустым.")
+    try:
+        login = await github_client.validate_token(token)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from app.secret_box import get_secret_box
+    box = get_secret_box()
+    crud.set_github_connection(db, token_secret=box.seal(token), login=login)
+    return schemas.GithubConnectionStatus(connected=True, login=login, masked_token=box.mask(token))
+
+
+@app.delete("/api/integrations/github", tags=["Integrations"])
+def disconnect_github_integration(current_user: CurrentUser, db: Session = Depends(get_db)):
+    crud.delete_github_connection(db)
+    return {"status": "disconnected"}
+
+
+@app.get("/api/integrations/github/repos", response_model=List[schemas.GithubRepo], tags=["Integrations"])
+async def list_github_repos(current_user: CurrentUser, db: Session = Depends(get_db)):
+    conn = crud.get_github_connection(db)
+    if not conn:
+        raise HTTPException(status_code=400, detail="GitHub-аккаунт не подключён.")
+    from app.secret_box import get_secret_box
+    token = get_secret_box().open(conn.token_secret)
+    try:
+        repos = await github_client.list_repos(token)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Ошибка GitHub API: {e}")
+    return repos
 
 
 # === УРОВЕНЬ 3: API для Приложений (публичные точки входа) ===
@@ -362,7 +799,7 @@ def get_applications(current_user: CurrentUser, db: Session = Depends(get_db)):
             },
             "service": {
                 "id": app_item.deployment_id,
-                "name": app_item.deployment.blueprint.name
+                "name": app_item.deployment.name or app_item.deployment.blueprint.name
             },
             "users": [
                 {"id": u.id, "username": u.username, "application_id": u.application_id}
@@ -411,9 +848,46 @@ def create_application(
         },
         "service": {
             "id": deployment.id,
-            "name": deployment.blueprint.name
+            "name": deployment.name or deployment.blueprint.name
         },
         "users": []
+    }
+
+
+@app.patch("/api/applications/{app_id}", tags=["Level 3: Applications"])
+def update_application(
+        app_id: int,
+        data: schemas.ApplicationUpdate,
+        background_tasks: BackgroundTasks,
+        current_user: CurrentUser,
+        db: Session = Depends(get_db)
+):
+    db_app = crud.get_application(db, app_id)
+    if not db_app:
+        raise HTTPException(status_code=404, detail="Приложение не найдено.")
+
+    if data.domain and data.domain != db_app.domain:
+        existing = crud.get_application_by_domain(db, data.domain)
+        if existing and existing.id != app_id:
+            raise HTTPException(status_code=400, detail="Приложение с таким доменом уже существует.")
+
+    updated = crud.update_application(db, app_id, data)
+
+    # Имя приложения не меняется → конфиг перезаписывается под тем же именем.
+    nginx_manager.update_application_nginx_config(
+        app_name=updated.name,
+        domain=updated.domain,
+        ssl_cert_name=updated.ssl_cert_name
+    )
+    background_tasks.add_task(nginx_manager.reload_nginx)
+
+    return {
+        "id": updated.id,
+        "name": updated.name,
+        "domain": updated.domain,
+        "ssl_cert_name": updated.ssl_cert_name,
+        "deployment_id": updated.deployment_id,
+        "service": {"id": updated.deployment_id, "name": updated.deployment.name or updated.deployment.blueprint.name},
     }
 
 
