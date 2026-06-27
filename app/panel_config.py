@@ -2,13 +2,16 @@
 import json
 from pathlib import Path
 from pydantic import BaseModel
-from typing import Optional
+
+from app.validators import OptionalDomainStr, OptionalCertName
 
 CONFIG_FILE = Path("data/panel_settings.json")
 
 class PanelSettings(BaseModel):
-    domain: Optional[str] = None
-    ssl_cert_name: Optional[str] = None
+    # Домен/сертификат панели идут в server_name и пути nginx-конфига — валидируем
+    # (см. app/validators.py). Пустая строка из UI («очистить домен») → None.
+    domain: OptionalDomainStr = None
+    ssl_cert_name: OptionalCertName = None
 
 def load_settings() -> PanelSettings:
     """Загружает настройки панели из JSON-файла."""

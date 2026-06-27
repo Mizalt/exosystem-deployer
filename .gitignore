@@ -31,3 +31,10 @@ secret.key
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# --- Local dev convenience (не для коммита) ---
+docker-compose.override.yml
+
+# --- Provisioning spike: состояние созданных облачных ресурсов (IDs, IP) ---
+# Широкий паттерн: покрывает и .json, и снесённые .json.removed (не для репо).
+app/cloud/spikes/.provisioned*

@@ -10,73 +10,123 @@ document.addEventListener('DOMContentLoaded', () => {
     const logoutBtn = document.getElementById('logoutBtn');
 
     // --- Кэш и Шаблоны ---
-    let CACHE = { groups: null, blueprints: null, services: null, applications: null, certs: null };
+    let CACHE = { groups: null, blueprints: null, services: null, applications: null, certs: null, systemMetrics: null, githubStatus: null, githubRepos: null };
     const templates = {
-        dashboard: `<header><h1>Дашборд</h1></header><div class="page-content"><p style="color:var(--text-secondary)">В разработке.</p></div>`,
+        dashboard: `<div class="page-content"><p style="color:var(--text-secondary)">Загрузка дашборда…</p></div>`,
+        pipeline: `<div id="pipelineRailHost"></div><div id="stageContent"></div>`,
         blueprints: `
-            <header><h1>Библиотека приложений</h1><button class="btn-primary" id="newBlueprintBtn"><span class="material-symbols-outlined">add</span>Создать приложение</button></header>
-            <div class="page-content"><div id="blueprintsList" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 16px;"><p>Загрузка...</p></div></div>`,
+            <div class="stage-toolbar">
+                <div class="stage-toolbar-text"><h2>Библиотека приложений</h2><span>Загруженные приложения и их версии (код)</span></div>
+                <button class="btn btn-primary" id="newBlueprintBtn"><span class="material-symbols-outlined">add</span>Создать приложение</button>
+            </div>
+            <div class="page-content"><div id="blueprintsList" class="library-grid"><p>Загрузка...</p></div></div>`,
         services: `
-            <header><h1>Сервисы (Запущенные контейнеры)</h1><button class="btn-primary" id="newServiceBtn"><span class="material-symbols-outlined">rocket_launch</span>Запустить сервис</button></header>
+            <div class="stage-toolbar">
+                <div class="stage-toolbar-text"><h2>Сервисы</h2><span>Запущенные контейнеры (внутренний порт)</span></div>
+                <button class="btn btn-primary" id="newServiceBtn"><span class="material-symbols-outlined">rocket_launch</span>Запустить сервис</button>
+            </div>
             <div class="content-area">
                 <div class="services-list" id="servicesContainer"><div class="section-title">Загрузка...</div></div>
-                <div class="details-panel" id="detailsPanel">
-                    <div class="details-content">
-                        <div style="display: flex; justify-content: space-between; align-items: center;"><h2 id="detName">Детали</h2><button class="icon-btn" id="closeDetailsBtn"><span class="material-symbols-outlined">close</span></button></div>
-                        <div id="detStatus" style="font-size: 14px; margin-bottom: 8px;"></div>
-                        <div id="detArtifactInfo" style="font-size: 14px; color: var(--text-secondary);"></div>
-                        <div class="stat-grid"><div class="stat-card"><div class="stat-card-label">CPU</div><div class="stat-card-value" id="statCpu">--</div></div><div class="stat-card"><div class="stat-card-label">Memory</div><div class="stat-card-value" id="statMemory">--</div></div></div>
-                        <div class="section-title">Консоль</div><div class="log-window" id="logWindow">...</div>
-                    </div>
-                </div>
             </div>`,
         applications: `
-            <header><h1>Приложения (Публичные домены)</h1><button class="btn-primary" id="newAppBtn"><span class="material-symbols-outlined">public</span>Опубликовать сервис</button></header>
-            <div class="page-content"><div class="settings-card"><table class="styled-table" id="appsTable"><thead><tr><th>Имя приложения</th><th>Домен</th><th>Указывает на сервис</th><th>SSL</th><th>Действия</th></tr></thead><tbody><tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div></div>`,
+            <div class="stage-toolbar">
+                <div class="stage-toolbar-text"><h2>Приложения</h2><span>Публичные домены (точки входа)</span></div>
+                <button class="btn btn-primary" id="newAppBtn"><span class="material-symbols-outlined">public</span>Опубликовать сервис</button>
+            </div>
+            <div class="page-content"><div class="settings-card"><table class="styled-table" id="appsTable"><thead><tr><th>Имя приложения</th><th>Домен</th><th>Указывает на сервис</th><th>SSL</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div></div>`,
         ssl: `
-            <header><h1 style="font-weight: 400; font-size: 28px;">Управление SSL сертификатами</h1></header>
-            <div class="page-content page-grid">
-                <div>
-                    <div class="settings-card"><h3>Существующие сертификаты</h3><table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th>Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div>
-                    <div class="settings-card"><h3>Выпустить сертификат Let's Encrypt</h3><p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">Убедитесь, что A-запись домена указывает на IP сервера. Используйте DNS-чекер для проверки.</p><form id="issueSslForm" class="settings-form"><input type="text" name="domain" placeholder="example.com" required><button type="submit" class="btn btn-primary deploy-action">Выпустить</button></form><div class="log-window" id="sslLogWindow" style="height: 250px; display: none; margin-top: 16px;"></div></div>
+            <header><h1>SSL сертификаты</h1></header>
+            <div class="page-content">
+                <div class="tab-bar">
+                    <button class="tab active" data-tab="certs"><span class="material-symbols-outlined">verified</span>Сертификаты</button>
+                    <button class="tab" data-tab="issue"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
+                    <button class="tab" data-tab="upload"><span class="material-symbols-outlined">upload</span>Загрузить свой</button>
                 </div>
-                <div>
-                     <div class="settings-card"><h3>Проверить DNS</h3><form id="checkDnsForm" class="settings-form"><input type="text" name="domain" placeholder="example.com" required><button type="submit" class="btn btn-primary">Проверить</button></form><div id="dnsResult"></div></div>
-                    <div class="settings-card"><h3>Загрузить свой сертификат</h3><form id="uploadCertForm"><div class="form-group"><label>Имя для хранения</label><input type="text" name="name" placeholder="my-custom-cert" required pattern="^[a-zA-Z0-9._\\-]+$"></div><div class="form-group"><label>Файл сертификата (fullchain.pem)</label><input type="file" name="cert_file" required accept=".pem,.crt"></div><div class="form-group"><label>Приватный ключ (privkey.pem)</label><input type="file" name="key_file" required accept=".pem,.key"></div><button type="submit" class="btn btn-primary" style="margin-top: 8px;">Загрузить</button></form></div>
+                <div class="tab-panel active" data-panel="certs">
+                    <div class="settings-card"><table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div>
+                </div>
+                <div class="tab-panel" data-panel="issue">
+                    <div class="settings-card" style="max-width:560px;">
+                        <h3>Выпустить Let's Encrypt</h3>
+                        <p class="card-hint">A-запись домена должна указывать на этот сервер. Проверка идёт автоматически при вводе.</p>
+                        <form id="issueSslForm">
+                            <div class="form-group"><label>Домен</label><input type="text" name="domain" placeholder="example.com" required autocomplete="off"><div class="dns-inline" data-dns-for="sslDomain"></div></div>
+                            <button type="submit" class="btn btn-primary deploy-action"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
+                        </form>
+                        <div class="log-window" id="sslLogWindow" style="height: 250px; display: none; margin-top: 16px;"></div>
+                    </div>
+                </div>
+                <div class="tab-panel" data-panel="upload">
+                    <div class="settings-card" style="max-width:560px;">
+                        <h3>Загрузить свой сертификат</h3>
+                        <form id="uploadCertForm">
+                            <div class="form-group"><label>Имя для хранения</label><input type="text" name="name" placeholder="my-custom-cert" required pattern="^[a-zA-Z0-9._\\-]+$"></div>
+                            <div class="form-group"><label>Файл сертификата (fullchain.pem)</label><input type="file" name="cert_file" required accept=".pem,.crt"></div>
+                            <div class="form-group"><label>Приватный ключ (privkey.pem)</label><input type="file" name="key_file" required accept=".pem,.key"></div>
+                            <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">upload</span>Загрузить</button>
+                        </form>
+                    </div>
                 </div>
             </div>`,
         settings: `
             <header><h1>Настройки</h1></header>
             <div class="page-content">
-                <div class="settings-card">
-                    <h3>Домен панели (Deployer)</h3>
-                    <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                        Настройте основной адрес, по которому вы заходите в эту панель.
-                    </p>
-                    <form id="panelSettingsForm">
-                        <div class="form-group">
-                            <label>Домен панели</label>
-                            <input type="text" name="domain" placeholder="panel.example.com">
-                        </div>
-                        <div class="form-group">
-                            <label>SSL Сертификат</label>
-                            <select name="ssl_cert_name">
-                                <option value="">Без SSL (HTTP)</option>
-                            </select>
-                        </div>
-                        <button type="submit" class="btn btn-primary">Применить настройки домена</button>
-                    </form>
+                <div class="tab-bar">
+                    <button class="tab active" data-tab="panel"><span class="material-symbols-outlined">tune</span>Панель</button>
+                    <button class="tab" data-tab="ports"><span class="material-symbols-outlined">lan</span>Группы портов</button>
+                    <button class="tab" data-tab="integrations"><span class="material-symbols-outlined">hub</span>Интеграции</button>
                 </div>
-                <div class="page-grid">
-                    <div>
-                        <div class="settings-card">
-                            <h3>Группы портов</h3><p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">Группы определяют диапазоны портов для новых сервисов.</p><table class="styled-table" id="groupsTable"><thead><tr><th>Имя</th><th>Диапазон портов</th><th>Действия</th></tr></thead><tbody><tr><td colspan="3" style="text-align:center; color:var(--text-secondary)">Загрузка...</td></tr></tbody></table>
-                        </div>
+                <div class="tab-panel active" data-panel="panel">
+                    <div id="firstAccessBanner"></div>
+                    <div class="settings-card" style="max-width:560px;">
+                        <h3>Домен панели (Deployer)</h3>
+                        <p class="card-hint">Основной адрес, по которому вы заходите в эту панель.</p>
+                        <form id="panelSettingsForm">
+                            <div class="form-group"><label>Домен панели</label><input type="text" name="domain" placeholder="panel.example.com" autocomplete="off"><div class="dns-inline" data-dns-for="panelDomain"></div></div>
+                            <div class="form-group">
+                                <label>SSL / HTTPS</label>
+                                <select name="ssl_mode" id="panelSslMode">
+                                    <option value="none">Без SSL (HTTP)</option>
+                                    <option value="issue">Выпустить сертификат сейчас (Let's Encrypt)</option>
+                                    <option value="existing">Выбрать существующий сертификат</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="panelSslExistingGroup" style="display:none;">
+                                <label>Сертификат</label>
+                                <select name="ssl_cert_name"><option value="">—</option></select>
+                            </div>
+                            <div id="panelSslIssueHint" style="display:none; margin-bottom:16px;">
+                                <div id="panelDnsStatus" style="font-size:13px; color:var(--text-secondary);">Введите домен — проверим DNS перед выпуском.</div>
+                                <div class="log-window" id="panelSslLogWindow" style="height:160px; display:none; margin-top:12px;"></div>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Применить</button>
+                        </form>
                     </div>
-                    <div>
+                </div>
+                <div class="tab-panel" data-panel="ports">
+                    <div class="page-grid">
+                        <div class="settings-card">
+                            <h3>Группы портов</h3><p class="card-hint">Группы определяют диапазоны портов для новых сервисов.</p><table class="styled-table" id="groupsTable"><thead><tr><th>Имя</th><th>Диапазон портов</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="3" style="text-align:center; color:var(--text-secondary)">Загрузка...</td></tr></tbody></table>
+                        </div>
                         <div class="settings-card">
                             <h3>Создать новую группу</h3><form id="createGroupForm"><div class="form-group"><label>Имя группы</label><input type="text" name="name" placeholder="backend-services" required></div><div class="form-group"><label>Начальный порт</label><input type="number" name="start_port" placeholder="9001" required></div><div class="form-group"><label>Конечный порт</label><input type="number" name="end_port" placeholder="9010" required></div><button type="submit" class="btn btn-primary" style="margin-top: 8px;">Создать</button></form>
                         </div>
+                    </div>
+                </div>
+                <div class="tab-panel" data-panel="integrations">
+                    <div class="settings-card" style="max-width:560px;">
+                        <h3><span class="material-symbols-outlined" style="vertical-align:middle;">code</span> GitHub</h3>
+                        <p class="card-hint">Подключите аккаунт, чтобы импортировать версии из приватных
+                            репозиториев и выбирать репозиторий из списка при добавлении версии.</p>
+                        <div id="githubStatus" style="margin-bottom:14px; color:var(--text-secondary)">Загрузка…</div>
+                        <form id="githubConnectForm">
+                            <div class="form-group"><label>Personal Access Token</label>
+                                <input type="password" name="token" placeholder="ghp_…" autocomplete="off"></div>
+                            <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">link</span>Подключить</button>
+                            <button type="button" class="btn btn-danger" id="githubDisconnectBtn" style="display:none;"><span class="material-symbols-outlined">link_off</span>Отключить</button>
+                        </form>
+                        <p class="card-hint">Токен — fine-grained PAT с доступом на нужные репозитории
+                            (Contents: Read). Хранится зашифрованным, никогда не показывается полностью.</p>
                     </div>
                 </div>
             </div>`,
@@ -95,10 +145,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const showApp = () => {
         loginScreen.style.display = 'none';
         appContainer.style.display = 'flex';
+        wireModalForms();
         const initialPage = window.location.hash.substring(1) || 'services';
         if (!window.location.hash) window.location.replace('#' + initialPage);
         navigate(initialPage);
+        startPolling();  // live-обновление статусов/логов
     };
+
+    // Обработчики submit модалок раньше навешивались только в init-функциях стадий;
+    // боковая панель дашборда открывает те же модалки откуда угодно, поэтому
+    // навешиваем их один раз глобально (идемпотентно через .onsubmit).
+    function wireModalForms() {
+        const set = (id, fn) => { const el = document.getElementById(id); if (el) el.onsubmit = fn; };
+        set('serviceForm', handleCreateService);
+        set('redeployForm', handleRedeployService);
+        set('configForm', handleServiceConfig);
+        set('applicationForm', handleCreateApplication);
+        set('editApplicationForm', handleEditApplication);
+        set('blueprintForm', handleBlueprintSubmit);
+        const up = document.getElementById('uploadArtifactForm');
+        if (up) { up.onsubmit = handleUploadArtifact; up.elements.zip_file.onchange = handleArtifactFileSelected; wireUploadSourceTabs(); }
+    }
 
     loginForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -133,25 +200,774 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     logoutBtn.addEventListener('click', () => {
+        stopPolling();
         clearToken();
         invalidateCache('groups', 'blueprints', 'services', 'applications', 'certs');
         showLoginScreen();
     });
 
-    // --- Роутер ---
-    const navigate = (page) => {
-        mainContent.innerHTML = templates[page] || `<p>Страница не найдена</p>`;
-        document.querySelectorAll('.nav-item').forEach(link => link.classList.toggle('active', link.dataset.page === page));
-        const initFunctions = { blueprints: initBlueprintsPage, services: initServicesPage, applications: initApplicationsPage, ssl: initSslPage, settings: initSettingsPage };
-        if (initFunctions[page]) initFunctions[page]();
+    // --- Конвейер (визуальный степпер над контентом стадий) ---
+    const PIPELINE_STAGES = [
+        { page: 'blueprints', num: 1, label: 'Библиотека', cacheKey: 'blueprints' },
+        { page: 'services', num: 2, label: 'Сервисы', cacheKey: 'services' },
+        { page: 'applications', num: 3, label: 'Приложения', cacheKey: 'applications' },
+    ];
+    const stageCount = key => (Array.isArray(CACHE[key]) ? CACHE[key].length : '·');
+    const railHTML = (activePage) => {
+        const stages = PIPELINE_STAGES.map(s => `
+            <div class="pipeline-stage ${s.page === activePage ? 'active' : ''}" data-stage="${s.page}">
+                <span class="stage-label">${s.label}</span>
+                <span class="stage-count" data-count-for="${s.cacheKey}">${stageCount(s.cacheKey)}</span>
+            </div>`).join('<span class="pipeline-connector"><span class="material-symbols-outlined">arrow_forward</span></span>');
+        return `<div class="pipeline-rail">${stages}</div>`;
+    };
+    // Обновляет счётчик стадии в шапке конвейера (вызывается после загрузки данных).
+    const updateRailCount = (cacheKey) => {
+        const el = document.querySelector(`[data-count-for="${cacheKey}"]`);
+        if (el) el.textContent = stageCount(cacheKey);
+    };
+    // Заполняет ВСЕ счётчики конвейера сразу при открытии (не только активной стадии),
+    // иначе соседние показывают «·» пока в них не перейдёшь. Данные кэшируются — дёшево.
+    const refreshAllRailCounts = () => {
+        PIPELINE_STAGES.forEach(async s => {
+            try { await fetchData(s.cacheKey, `/api/${s.cacheKey}`); updateRailCount(s.cacheKey); } catch (_) { /* тихо */ }
+        });
     };
 
+    let currentStage = 'blueprints';
+    // Лениво: функции-инициализаторы объявлены ниже (const), резолвим в момент вызова,
+    // а не при инициализации (иначе TDZ — обращение до объявления).
+    const stageInit = (stage) => ({ blueprints: initBlueprintsPage, services: initServicesPage, applications: initApplicationsPage }[stage]);
+
+    // Рендер единой страницы «Конвейер»: степпер сверху + контент текущей стадии.
+    const renderPipeline = () => {
+        mainContent.innerHTML = templates.pipeline;
+        document.getElementById('pipelineRailHost').innerHTML = railHTML(currentStage);
+        mainContent.querySelectorAll('.pipeline-stage').forEach(stage => stage.onclick = () => switchStage(stage.dataset.stage));
+        switchStage(currentStage);
+        refreshAllRailCounts();  // заполнить счётчики всех стадий сразу, а не только активной
+    };
+    const switchStage = (stage) => {
+        currentStage = stage;
+        mainContent.querySelectorAll('.pipeline-stage').forEach(s => s.classList.toggle('active', s.dataset.stage === stage));
+        document.getElementById('stageContent').innerHTML = templates[stage] || '';
+        const init = stageInit(stage);
+        if (init) init();
+    };
+    // Переход на стадию конвейера с опциональным действием после рендера (напр. открыть модалку).
+    const goToStage = (stage, cb) => {
+        if (document.getElementById('stageContent')) switchStage(stage);
+        else { currentStage = stage; renderPipeline(); }
+        if (cb) setTimeout(cb, 50);
+    };
+
+    // --- Роутер ---
+    const navigate = (page) => {
+        // Прямые хэши стадий (#services и т.п.) открывают конвейер на нужной стадии
+        // (обратная совместимость + переходы «Запустить»/«Опубликовать»).
+        if (PIPELINE_STAGES.some(s => s.page === page)) { currentStage = page; page = 'pipeline'; }
+        if (page === 'pipeline') {
+            renderPipeline();
+        } else {
+            mainContent.innerHTML = templates[page] || `<p>Страница не найдена</p>`;
+            const initFunctions = { dashboard: initDashboardPage, ssl: initSslPage, settings: initSettingsPage };
+            if (initFunctions[page]) initFunctions[page]();
+        }
+        document.querySelectorAll('.nav-item').forEach(link => link.classList.toggle('active', link.dataset.page === page));
+    };
+
+    // --- Дашборд (настраиваемые пресеты + системные метрики) ---
+    // Реестр видов: добавление нового пресета = добавление ключа с render-функцией.
+    const DASHBOARD_VIEWS = {
+        graph:   { label: 'Граф',    icon: 'account_tree', render: renderGraphView },
+        columns: { label: 'Колонки', icon: 'view_column',  render: renderColumnsView },
+    };
+    const getDashboardView = () => { const v = localStorage.getItem('dashboardView'); return DASHBOARD_VIEWS[v] ? v : 'graph'; };
+
+    function initDashboardPage() { renderDashboard(); }
+
+    async function renderDashboard() {
+        const view = getDashboardView();
+        mainContent.innerHTML = `
+            <header>
+                <h1>Дашборд</h1>
+                <div class="action-row">
+                    <div class="view-switcher" id="dashViewSwitcher">
+                        ${Object.entries(DASHBOARD_VIEWS).map(([k, v]) => `<button class="view-option ${k === view ? 'active' : ''}" data-view="${k}" title="${v.label}"><span class="material-symbols-outlined">${v.icon}</span>${v.label}</button>`).join('')}
+                    </div>
+                    <button class="btn-icon-label" id="dashRefreshBtn"><span class="material-symbols-outlined">refresh</span>Обновить</button>
+                </div>
+            </header>
+            <div class="page-content dashboard-content">
+                <div class="metrics-strip" id="metricsStrip">${metricsSkeletonHTML()}</div>
+                <div class="dashboard-view-host" id="dashViewHost"><p style="color:var(--text-secondary)">Загрузка…</p></div>
+            </div>`;
+        document.getElementById('dashViewSwitcher').querySelectorAll('.view-option').forEach(btn => btn.onclick = () => { localStorage.setItem('dashboardView', btn.dataset.view); renderDashboard(); });
+        document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics'); renderDashboard(); };
+        loadDashboardMetrics();
+        const host = document.getElementById('dashViewHost');
+        try { await DASHBOARD_VIEWS[view].render(host); }
+        catch (e) { if (getToken()) host.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки дашборда.</p>`; }
+    }
+
+    // Полоса метрик: 6 карточек присутствуют ВСЕГДА (фикс. сетка). Скелетон показывается
+    // до прихода данных, затем значения подставляются в уже отрисованные блоки — поэтому
+    // верстка не «прыгает» (не появляется/не меняет размер при загрузке).
+    const METRIC_LABELS = ['Сервисы', 'CPU сервисов', 'RAM сервисов', 'Сеть сервисов', 'Диск Docker', 'Хост'];
+    const metricCardHTML = (label, value, sub, accent) =>
+        `<div class="metric-card${accent ? ' ' + accent : ''}"><div class="metric-label">${label}</div><div class="metric-value">${value}</div><div class="metric-sub">${sub}</div></div>`;
+    function metricsSkeletonHTML() {
+        return METRIC_LABELS.map(label =>
+            `<div class="metric-card loading"><div class="metric-label">${label}</div><div class="metric-value"><span class="skel skel-val"></span></div><div class="metric-sub"><span class="skel skel-sub"></span></div></div>`
+        ).join('');
+    }
+
+    async function loadDashboardMetrics() {
+        const strip = document.getElementById('metricsStrip');
+        if (!strip) return;
+        try {
+            // Метрики подаём с точки зрения объектов деплоера (сервисов), а не хоста:
+            // host-счётчики Docker (все контейнеры/образы машины) путают пользователя.
+            const [m, services] = await Promise.all([
+                fetchData('systemMetrics', '/api/system/metrics'),
+                fetchData('services', '/api/services'),
+            ]);
+            const host = m.host || {}, disk = m.disk || {}, load = m.load || {};
+            const online = services.filter(s => s.status === 'online').length;
+            const failed = services.filter(s => s.status === 'failed').length;
+            const fmtMb = v => v == null ? '—' : (v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${v} MB`);
+            strip.innerHTML =
+                metricCardHTML('Сервисы', `${online} online`, `${failed} failed · ${services.length} всего`, failed ? 'warn' : '') +
+                metricCardHTML('CPU сервисов', `${load.cpu_percent ?? 0}%`, `${load.managed_running ?? 0} запущено`) +
+                metricCardHTML('RAM сервисов', fmtMb(load.memory_usage_mb), `из ${fmtMb(host.mem_total_mb)} хоста`) +
+                metricCardHTML('Сеть сервисов', `↓ ${fmtMb(load.net_rx_mb)}`, `↑ ${fmtMb(load.net_tx_mb)}`) +
+                metricCardHTML('Диск Docker', fmtMb(disk.images_mb), `образы · тома ${fmtMb(disk.volumes_mb)}`) +
+                metricCardHTML('Хост', `${host.ncpu ?? '?'} CPU`, `${fmtMb(host.mem_total_mb)} RAM · Docker ${host.server_version ?? ''}`);
+        } catch (e) {
+            // Даже при сбое Docker карточки остаются на месте (значение «—», подпись «недоступно»),
+            // чтобы полоса метрик не схлопывалась и верстка не прыгала.
+            if (getToken()) strip.innerHTML = METRIC_LABELS.map(l => metricCardHTML(l, '—', 'недоступно')).join('');
+        }
+    }
+
+    // Авто-обновление дашборда после мутирующего запроса (если открыт он и нет модалки).
+    function maybeRefreshDashboard(method) {
+        if (!method || method === 'GET') return;
+        if (window.location.hash.replace('#', '') !== 'dashboard') return;
+        if (document.querySelector('.modal-backdrop.show')) return;
+        invalidateCache('systemMetrics');
+        clearTimeout(maybeRefreshDashboard._t);
+        maybeRefreshDashboard._t = setTimeout(() => { if (window.location.hash.replace('#', '') === 'dashboard') renderDashboard(); }, 120);
+    }
+
+    // Готовит узлы и рёбра графа из уже кэшируемых данных трёх уровней.
+    // Узлы — описатели (kind/id/inner/col), рёбра обогащены метаданными связи
+    // (имена/виды концов + текст отношения) для попапа по клику на линию.
+    const REL_LABELS = { 'bp>svc': 'Сервис развёрнут из этой сборки', 'svc>app': 'Приложение опубликовано на этом сервисе' };
+
+    // Упорядочивает узлы ВНУТРИ колонок так, чтобы связанные узлы стояли «друг напротив
+    // друга» — это убирает пересечение стрелок («икс» 1-2/2-1 вместо 1-1/2-2) и в графе,
+    // и в колонках. Барицентр-эвристика (как в Sugiyama-раскладке): колонка сортируется
+    // по средней позиции своих родителей в предыдущей колонке. Один прямой проход слева
+    // направо достаточно для нашего дерева из 3 уровней (Библиотека→Сервисы→Приложения).
+    // Мутирует массив `nodes` на месте (его порядок и определяет раскладку обоих видов).
+    function orderNodesByConnection(nodes, edges) {
+        const NO_PARENT = 1e9;  // узлы без родителя уходят вниз колонки, сохраняя относительный порядок
+        const parents = {};
+        edges.forEach(e => { (parents[e.to] = parents[e.to] || []).push(e.from); });
+        const byCol = [[], [], []];
+        nodes.forEach(n => { if (byCol[n.col]) byCol[n.col].push(n); });
+        const pos = {};  // key → позиция узла в своей колонке (заполняется по мере прохода)
+        byCol[0].forEach((n, i) => { pos[n.key] = i; });  // колонка 0 сохраняет исходный порядок
+        const bary = n => {
+            const ps = (parents[n.key] || []).map(k => pos[k]).filter(v => v != null);
+            return ps.length ? ps.reduce((s, v) => s + v, 0) / ps.length : NO_PARENT;
+        };
+        for (let c = 1; c < 3; c++) {
+            byCol[c].forEach((n, i) => { n._ord = i; });  // исходный индекс — стабильный tiebreak
+            byCol[c].sort((a, b) => (bary(a) - bary(b)) || (a._ord - b._ord));
+            byCol[c].forEach((n, i) => { pos[n.key] = i; });
+        }
+        byCol.forEach(col => col.forEach(n => { delete n._ord; }));
+        nodes.length = 0;  // перезаписываем массив новым порядком (col0, col1, col2)
+        byCol.forEach(col => col.forEach(n => nodes.push(n)));
+    }
+
+    async function buildDashboardData() {
+        const [blueprints, services, applications] = await Promise.all([
+            fetchData('blueprints', '/api/blueprints'),
+            fetchData('services', '/api/services'),
+            fetchData('applications', '/api/applications'),
+        ]);
+        const emptyNote = t => `<div class="graph-empty">${t}</div>`;
+        const nodes = [];
+        blueprints.forEach(bp => nodes.push({ key: `bp-${bp.id}`, kind: 'bp', cls: 'bp', id: bp.id, col: 0, name: bp.name,
+            title: `${bp.name} · версий: ${bp.artifacts.length}`,
+            inner: `<span class="material-symbols-outlined">inventory_2</span><span class="gn-label">${escapeHTML(bp.name)}</span><span class="gn-badge">v${bp.artifacts.length}</span>` }));
+        services.forEach(s => nodes.push({ key: `svc-${s.id}`, kind: 'svc', cls: 'svc', id: s.id, col: 1, name: s.name,
+            title: `${s.name} · ${s.status} · порт ${s.assigned_port} · ${s.artifact.version_tag}`,
+            inner: `<span class="status-dot ${s.status}"></span><span class="gn-label">${escapeHTML(s.name)}</span><span class="gn-port">:${s.assigned_port}</span>` }));
+        applications.forEach(a => nodes.push({ key: `app-${a.id}`, kind: 'app', cls: 'app', id: a.id, col: 2, name: a.domain,
+            title: `${a.domain}${a.ssl_cert_name ? ' · SSL' : ' · HTTP'}`,
+            inner: `<span class="material-symbols-outlined">${a.ssl_cert_name ? 'lock' : 'public'}</span><span class="gn-label">${escapeHTML(a.domain)}</span>` }));
+        const nodeByKey = {}; nodes.forEach(n => nodeByKey[n.key] = n);
+
+        const edges = [];
+        const addEdge = (from, to) => {
+            const a = nodeByKey[from], b = nodeByKey[to];
+            if (!a || !b) return;
+            edges.push({ from, to, fromKind: a.kind, toKind: b.kind, fromId: a.id, toId: b.id, fromName: a.name, toName: b.name, relLabel: REL_LABELS[`${a.kind}>${b.kind}`] || 'Связь' });
+        };
+        services.forEach(s => { if (s.artifact && s.artifact.blueprint_id != null) addEdge(`bp-${s.artifact.blueprint_id}`, `svc-${s.id}`); });
+        applications.forEach(a => { if (a.service && a.service.id != null) addEdge(`svc-${a.service.id}`, `app-${a.id}`); });
+
+        // Выстраиваем порядок узлов в колонках по связям — рёбра перестают пересекаться.
+        orderNodesByConnection(nodes, edges);
+
+        // Готовые HTML-колонки для статичного вида «Колонки».
+        const nodeHTML = n => `<div class="graph-node ${n.cls}" data-node="${n.key}" data-kind="${n.kind}" data-id="${n.id}" title="${escapeHTML(n.title)}">${n.inner}</div>`;
+        const colHTML = c => { const ns = nodes.filter(n => n.col === c); return ns.length ? ns.map(nodeHTML).join('') : emptyNote(['нет приложений', 'нет сервисов', 'нет публикаций'][c]); };
+        return { blueprints, services, applications, nodes, edges, nodeByKey, bpCol: colHTML(0), svcCol: colHTML(1), appCol: colHTML(2) };
+    }
+
+    const GRAPH_EMPTY = `<div class="settings-card"><p style="color:var(--text-secondary)">Пока нет объектов. Начните с Библиотеки в разделе «Конвейер».</p></div>`;
+
+    // Граф-вид: динамический холст (детерминированная раскладка + pan/zoom).
+    async function renderGraphView(host) {
+        const d = await buildDashboardData();
+        if (!d.blueprints.length && !d.services.length && !d.applications.length) { host.innerHTML = GRAPH_EMPTY; return; }
+        host.innerHTML = `
+            <div class="graph-viewport" id="graphViewport">
+                <div class="graph-world" id="graphWorld">
+                    <svg class="graph-edges" id="graphEdges" xmlns="http://www.w3.org/2000/svg"></svg>
+                </div>
+                <div class="graph-controls" id="graphControls">
+                    <button class="graph-ctl" data-z="in" title="Приблизить"><span class="material-symbols-outlined">add</span></button>
+                    <button class="graph-ctl" data-z="out" title="Отдалить"><span class="material-symbols-outlined">remove</span></button>
+                    <button class="graph-ctl" data-z="fit" title="Вместить"><span class="material-symbols-outlined">fit_screen</span></button>
+                </div>
+                <div class="graph-hint">Колесо — масштаб · перетаскивание — панорама · клик по связи — детали</div>
+            </div>`;
+        setupGraphCanvas(host, d);
+    }
+
+    // Статичный вид «Колонки»: карточки уровней, без рёбер.
+    async function renderColumnsView(host) {
+        const d = await buildDashboardData();
+        if (!d.blueprints.length && !d.services.length && !d.applications.length) { host.innerHTML = GRAPH_EMPTY; return; }
+        host.innerHTML = `
+            <div class="columns-canvas" id="graphCanvas">
+                <div class="settings-card graph-col"><div class="graph-col-title">Библиотека <span>${d.blueprints.length}</span></div><div class="graph-col-nodes">${d.bpCol}</div></div>
+                <div class="settings-card graph-col"><div class="graph-col-title">Сервисы <span>${d.services.length}</span></div><div class="graph-col-nodes">${d.svcCol}</div></div>
+                <div class="settings-card graph-col"><div class="graph-col-title">Приложения <span>${d.applications.length}</span></div><div class="graph-col-nodes">${d.appCol}</div></div>
+            </div>`;
+        setupColumnsInteractions(host, d.edges);
+    }
+
+    // --- Колонки: hover-подсветка цепочки + клик по узлу (без рёбер). ---
+    function setupColumnsInteractions(host, edges) {
+        const canvas = host.querySelector('#graphCanvas');
+        const fwd = {}, bwd = {};
+        edges.forEach(e => { (fwd[e.from] = fwd[e.from] || []).push(e.to); (bwd[e.to] = bwd[e.to] || []).push(e.from); });
+        const reach = (start, adj) => { const seen = new Set(), q = [start]; while (q.length) { const n = q.shift(); (adj[n] || []).forEach(t => { if (!seen.has(t)) { seen.add(t); q.push(t); } }); } return seen; };
+        const highlight = (key) => {
+            const visited = new Set([key, ...reach(key, fwd), ...reach(key, bwd)]);
+            canvas.classList.add('dim');
+            host.querySelectorAll('.graph-node').forEach(n => n.classList.toggle('highlight', visited.has(n.dataset.node)));
+        };
+        const clear = () => { canvas.classList.remove('dim'); host.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight')); };
+        host.querySelectorAll('.graph-node').forEach(node => {
+            node.onmouseenter = () => highlight(node.dataset.node);
+            node.onmouseleave = clear;
+            node.onclick = () => openDetailDrawer(node.dataset.kind, parseInt(node.dataset.id));
+        });
+    }
+
+    // Хранит активный resize-обработчик холста, чтобы снять его при ре-рендере.
+    let graphResizeHandler = null;
+    // --- Граф-холст: детерминированная раскладка, узлы+рёбра в одном transform-мире. ---
+    // Координаты рёбер берутся из раскладки (а не из getBoundingClientRect), поэтому
+    // стрелки совпадают с узлами при любом масштабе/панораме — корень прежних промахов.
+    function setupGraphCanvas(host, d) {
+        const viewport = host.querySelector('#graphViewport');
+        const world = host.querySelector('#graphWorld');
+        const svg = host.querySelector('#graphEdges');
+
+        const NODE_W = 240, NODE_H = 46, COL_GAP = 150, ROW_GAP = 18, PAD = 28, TITLE_H = 34;
+        const COL_LABELS = ['Библиотека', 'Сервисы', 'Приложения'];
+        const COL_EMPTY = ['нет приложений', 'нет сервисов', 'нет публикаций'];
+        const colCounts = [d.blueprints.length, d.services.length, d.applications.length];
+
+        // Раскладка: 3 колонки на фикс. X, узлы стопкой, колонки центрируются по вертикали.
+        const byCol = [[], [], []];
+        d.nodes.forEach(n => byCol[n.col].push(n));
+        const colH = byCol.map(ns => ns.length ? ns.length * NODE_H + (ns.length - 1) * ROW_GAP : NODE_H);
+        const contentH = Math.max(...colH);
+        const worldW = PAD * 2 + 3 * NODE_W + 2 * COL_GAP;
+        const worldH = PAD * 2 + TITLE_H + contentH;
+
+        const pos = {};
+        let nodesHTML = '';
+        for (let c = 0; c < 3; c++) {
+            const x = PAD + c * (NODE_W + COL_GAP);
+            nodesHTML += `<div class="graph-col-title canvas-title" style="left:${x}px;top:${PAD}px;width:${NODE_W}px">${COL_LABELS[c]} <span>${colCounts[c]}</span></div>`;
+            const ns = byCol[c];
+            const y0 = PAD + TITLE_H + (contentH - colH[c]) / 2;
+            if (!ns.length) { nodesHTML += `<div class="graph-empty canvas-empty" style="left:${x}px;top:${y0}px;width:${NODE_W}px">${COL_EMPTY[c]}</div>`; continue; }
+            ns.forEach((n, i) => {
+                const y = y0 + i * (NODE_H + ROW_GAP);
+                pos[n.key] = { x, y };
+                nodesHTML += `<div class="graph-node canvas-node ${n.cls}" data-node="${n.key}" data-kind="${n.kind}" data-id="${n.id}" title="${escapeHTML(n.title)}" style="left:${x}px;top:${y}px">${n.inner}</div>`;
+            });
+        }
+        world.style.width = worldW + 'px'; world.style.height = worldH + 'px';
+        svg.setAttribute('width', worldW); svg.setAttribute('height', worldH);
+        svg.setAttribute('viewBox', `0 0 ${worldW} ${worldH}`);
+        world.insertAdjacentHTML('beforeend', nodesHTML);
+
+        // Рёбра: видимая кривая + широкая прозрачная «hit»-кривая для клика/наведения.
+        const defs = `<defs><marker id="arrowHead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--text-secondary)"/></marker></defs>`;
+        const edgeByKey = {};
+        svg.innerHTML = defs + d.edges.map(e => {
+            const a = pos[e.from], b = pos[e.to];
+            if (!a || !b) return '';
+            const key = `${e.from}__${e.to}`; edgeByKey[key] = e;
+            const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mx = (x1 + x2) / 2;
+            const path = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+            return `<path class="graph-edge" data-edge="${key}" marker-end="url(#arrowHead)" d="${path}" />` +
+                   `<path class="graph-edge-hit" data-edge="${key}" d="${path}" />`;
+        }).join('');
+
+        // Подсветка цепочки (предки+потомки) и отдельной связи.
+        const fwd = {}, bwd = {};
+        d.edges.forEach(e => { (fwd[e.from] = fwd[e.from] || []).push(e.to); (bwd[e.to] = bwd[e.to] || []).push(e.from); });
+        const reach = (start, adj) => { const seen = new Set(), q = [start]; while (q.length) { const n = q.shift(); (adj[n] || []).forEach(t => { if (!seen.has(t)) { seen.add(t); q.push(t); } }); } return seen; };
+        const highlightNode = (key) => {
+            const visited = new Set([key, ...reach(key, fwd), ...reach(key, bwd)]);
+            world.classList.add('dim');
+            world.querySelectorAll('.graph-node').forEach(n => n.classList.toggle('highlight', visited.has(n.dataset.node)));
+            world.querySelectorAll('.graph-edge').forEach(p => { const [f, t] = p.dataset.edge.split('__'); p.classList.toggle('highlight', visited.has(f) && visited.has(t)); });
+        };
+        const highlightEdge = (key) => {
+            const e = edgeByKey[key]; if (!e) return;
+            world.classList.add('dim');
+            world.querySelectorAll('.graph-node').forEach(n => n.classList.toggle('highlight', n.dataset.node === e.from || n.dataset.node === e.to));
+            world.querySelectorAll('.graph-edge').forEach(p => p.classList.toggle('highlight', p.dataset.edge === key));
+        };
+        const clearHighlight = () => { world.classList.remove('dim'); world.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight')); };
+
+        // Попап о связи: концы как кнопки (открывают drawer) + текст отношения.
+        const KIND_LABEL = { bp: 'Библиотека', svc: 'Сервис', app: 'Приложение' };
+        const closeEdgePopover = () => { const p = document.getElementById('graphEdgePopover'); if (p) p.remove(); };
+        const showEdgePopover = (e, evt) => {
+            closeEdgePopover();
+            const pop = document.createElement('div');
+            pop.className = 'graph-edge-popover'; pop.id = 'graphEdgePopover';
+            pop.innerHTML = `
+                <div class="gep-title"><span class="material-symbols-outlined">share</span>Связь</div>
+                <div class="gep-flow">
+                    <button class="gep-chip ${e.fromKind}" data-kind="${e.fromKind}" data-id="${e.fromId}"><span class="gep-kind">${KIND_LABEL[e.fromKind]}</span>${escapeHTML(e.fromName)}</button>
+                    <span class="material-symbols-outlined gep-arrow">arrow_forward</span>
+                    <button class="gep-chip ${e.toKind}" data-kind="${e.toKind}" data-id="${e.toId}"><span class="gep-kind">${KIND_LABEL[e.toKind]}</span>${escapeHTML(e.toName)}</button>
+                </div>
+                <div class="gep-rel">${escapeHTML(e.relLabel)}</div>`;
+            viewport.appendChild(pop);
+            const r = viewport.getBoundingClientRect();
+            let x = evt.clientX - r.left + 12, y = evt.clientY - r.top + 12;
+            x = Math.min(x, r.width - pop.offsetWidth - 8);
+            y = Math.min(y, r.height - pop.offsetHeight - 8);
+            pop.style.left = Math.max(8, x) + 'px'; pop.style.top = Math.max(8, y) + 'px';
+            pop.querySelectorAll('.gep-chip').forEach(c => c.onclick = ev => { ev.stopPropagation(); closeEdgePopover(); openDetailDrawer(c.dataset.kind, parseInt(c.dataset.id)); });
+            highlightEdge(`${e.from}__${e.to}`);
+        };
+
+        // Pan/zoom: единый CSS-transform на мире (узлы и рёбра двигаются вместе).
+        let zoom = 1, panX = 0, panY = 0;
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const apply = () => { world.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`; };
+        const fit = () => {
+            const vw = viewport.clientWidth, vh = viewport.clientHeight;
+            if (!vw || !vh) return;
+            zoom = clamp(Math.min(vw / worldW, vh / worldH) * 0.92, 0.2, 1.2);
+            panX = (vw - worldW * zoom) / 2; panY = (vh - worldH * zoom) / 2;
+            apply();
+        };
+        const zoomAt = (mx, my, factor) => {
+            const nz = clamp(zoom * factor, 0.2, 2.5);
+            panX = mx - ((mx - panX) / zoom) * nz;
+            panY = my - ((my - panY) / zoom) * nz;
+            zoom = nz; apply();
+        };
+
+        viewport.addEventListener('wheel', e => {
+            e.preventDefault();
+            const r = viewport.getBoundingClientRect();
+            zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+        }, { passive: false });
+
+        host.querySelector('#graphControls').addEventListener('click', e => {
+            const z = e.target.closest('button')?.dataset.z; if (!z) return;
+            if (z === 'fit') return fit();
+            const r = viewport.getBoundingClientRect();
+            zoomAt(r.width / 2, r.height / 2, z === 'in' ? 1.2 : 1 / 1.2);
+        });
+
+        // Панорама перетаскиванием фона; флаг moved отличает панораму от клика.
+        let dragging = false, moved = false, sx = 0, sy = 0, spx = 0, spy = 0;
+        const onBackground = t => !t.closest('.graph-node') && !t.closest('.graph-edge-hit') && !t.closest('.graph-controls') && !t.closest('.graph-edge-popover');
+        viewport.addEventListener('pointerdown', e => {
+            if (e.button !== 0) return;
+            moved = false;  // сброс на ЛЮБОМ нажатии — иначе прошлая панорама «съедает» следующий клик по узлу/связи
+            if (!onBackground(e.target)) return;  // панорама — только перетаскиванием фона
+            dragging = true; sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+            viewport.classList.add('panning'); viewport.setPointerCapture(e.pointerId);
+        });
+        viewport.addEventListener('pointermove', e => {
+            if (!dragging) return;
+            const dx = e.clientX - sx, dy = e.clientY - sy;
+            if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+            panX = spx + dx; panY = spy + dy; apply();
+        });
+        const endDrag = () => { if (dragging) { dragging = false; viewport.classList.remove('panning'); } };
+        viewport.addEventListener('pointerup', endDrag);
+        viewport.addEventListener('pointercancel', endDrag);
+
+        // Клик по фону — снять подсветку и закрыть попап.
+        viewport.addEventListener('click', e => {
+            if (moved || !onBackground(e.target)) return;
+            closeEdgePopover(); clearHighlight();
+        });
+
+        world.querySelectorAll('.graph-node').forEach(node => {
+            node.addEventListener('mouseenter', () => { if (!dragging) highlightNode(node.dataset.node); });
+            node.addEventListener('mouseleave', () => { if (!document.getElementById('graphEdgePopover')) clearHighlight(); });
+            node.addEventListener('click', e => { if (moved) return; e.stopPropagation(); closeEdgePopover(); openDetailDrawer(node.dataset.kind, parseInt(node.dataset.id)); });
+        });
+        world.querySelectorAll('.graph-edge-hit').forEach(hit => {
+            const key = hit.dataset.edge;
+            hit.addEventListener('mouseenter', () => { if (!dragging) highlightEdge(key); });
+            hit.addEventListener('mouseleave', () => { if (!document.getElementById('graphEdgePopover')) clearHighlight(); });
+            hit.addEventListener('click', e => { if (moved) return; e.stopPropagation(); showEdgePopover(edgeByKey[key], e); });
+        });
+
+        requestAnimationFrame(fit);
+        if (graphResizeHandler) window.removeEventListener('resize', graphResizeHandler);
+        graphResizeHandler = () => fit();
+        window.addEventListener('resize', graphResizeHandler);
+    }
+
+    // --- Боковая панель деталей (popup) для любого элемента дашборда ---
+    // Вся доступная информация + полное управление + кнопка перехода на «уровень».
+    function closeDrawer() { const d = document.getElementById('detailDrawer'); d.classList.remove('show'); delete d.dataset.kind; }
+    const goToLevel = (stage) => { closeDrawer(); window.location.hash = stage; };
+    const drawerRow = (k, v) => `<div class="detail-row"><span class="detail-k">${k}</span><span class="detail-v">${v}</span></div>`;
+    const authGet = (url) => fetch(url, { headers: { 'Authorization': `Bearer ${getToken()}` } }).then(r => r.json());
+    // Перерисовать список «Сервисов», если мы на этой стадии (drawer открыт поверх него).
+    const refreshServiceListIfOpen = () => { if (currentStage === 'services' && document.getElementById('servicesContainer')) loadAndDisplayServices(); };
+
+    // Живое обновление ОТКРЫТОГО drawer сервиса (логи + CPU/RAM) без перерисовки —
+    // сохраняет позицию скролла логов. Полную перерисовку делает поллинг при смене статуса.
+    function updateServiceDrawerLive(svc) {
+        if (svc.status === 'online') {
+            authGet(`/api/services/${svc.id}/stats`).then(s => {
+                const c = document.getElementById('drwCpu'), m = document.getElementById('drwMem');
+                if (c) c.textContent = `${s.cpu_percent}%`;
+                if (m) m.textContent = `${s.memory_usage_mb} MB`;
+            }).catch(() => {});
+        }
+        authGet(`/api/services/${svc.id}/logs`).then(d => {
+            const log = document.getElementById('drwLogs');
+            if (log) { const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40; log.textContent = d.logs || 'Логи пусты.'; if (atBottom) log.scrollTop = log.scrollHeight; }
+        }).catch(() => {});
+    }
+    // Поллинг открытого drawer сервиса: смена статуса → полная перерисовка (кнопки/индикаторы),
+    // иначе — живое обновление логов/статов на месте.
+    function pollServiceDrawer(services) {
+        const drawer = document.getElementById('detailDrawer');
+        if (!drawer.classList.contains('show') || drawer.dataset.kind !== 'svc') return;
+        const id = parseInt(drawer.dataset.id, 10);
+        const svc = services.find(s => s.id === id);
+        if (!svc) { closeDrawer(); return; }
+        if (String(svc.status) !== drawer.dataset.status) { openDetailDrawer('svc', id); return; }
+        updateServiceDrawerLive(svc);
+    }
+
+    async function openDetailDrawer(kind, id) {
+        const title = document.getElementById('drawerTitle');
+        const body = document.getElementById('drawerBody');
+        const drawer = document.getElementById('detailDrawer');
+        // Запоминаем, что показано — поллинг живёт-обновляет открытый drawer сервиса.
+        drawer.dataset.kind = kind; drawer.dataset.id = id;
+        body.innerHTML = `<p style="color:var(--text-secondary)">Загрузка…</p>`;
+        drawer.classList.add('show');
+        try {
+            if (kind === 'bp') await renderBlueprintDrawer(id, title, body);
+            else if (kind === 'svc') await renderServiceDrawer(id, title, body);
+            else if (kind === 'app') await renderAppDrawer(id, title, body);
+        } catch (e) { body.innerHTML = `<p style="color:var(--danger)">Не удалось загрузить детали.</p>`; }
+    }
+
+    async function renderBlueprintDrawer(id, title, body) {
+        const blueprints = await fetchData('blueprints', '/api/blueprints');
+        const bp = blueprints.find(b => b.id === id);
+        if (!bp) { body.innerHTML = 'Не найдено.'; return; }
+        title.innerHTML = `<span class="material-symbols-outlined">inventory_2</span>${escapeHTML(bp.name)}`;
+        const versions = [...bp.artifacts].reverse().map(a => `<li class="drawer-version"><span class="mono">${escapeHTML(a.version_tag)}</span><span>${new Date(a.created_at).toLocaleDateString()}</span></li>`).join('') || '<li class="drawer-version" style="color:var(--text-secondary)">Нет версий</li>';
+        body.innerHTML = `
+            <div class="detail-chain">
+                ${drawerRow('Тип', 'Приложение в библиотеке (blueprint)')}
+                ${drawerRow('Описание', escapeHTML(bp.description) || '—')}
+                ${drawerRow('Версий', bp.artifacts.length)}
+            </div>
+            <div class="section-title">Версии</div>
+            <ul class="drawer-versions">${versions}</ul>
+            <div class="action-row" style="margin-top:16px;">
+                <button class="btn-icon-label" id="drwUpload"><span class="material-symbols-outlined">upload</span>Загрузить версию</button>
+                <button class="btn-icon-label" id="drwGoto"><span class="material-symbols-outlined">arrow_forward</span>Перейти в Библиотеку</button>
+            </div>`;
+        document.getElementById('drwGoto').onclick = () => goToLevel('blueprints');
+        document.getElementById('drwUpload').onclick = () => { closeDrawer(); openUploadModal(bp.id, bp.name); };
+    }
+
+    async function renderServiceDrawer(id, title, body) {
+        const services = await fetchData('services', '/api/services');
+        const svc = services.find(s => s.id === id);
+        if (!svc) { body.innerHTML = 'Не найдено.'; return; }
+        const online = svc.status === 'online';
+        document.getElementById('detailDrawer').dataset.status = svc.status;  // поллинг сверяет смену статуса
+        title.innerHTML = `<span class="status-dot ${svc.status}"></span>${escapeHTML(svc.name)}`;
+        body.innerHTML = `
+            <div class="detail-chain">
+                ${drawerRow('Тип', 'Сервис (контейнер)')}
+                ${drawerRow('Статус', `<span class="status-dot ${svc.status}"></span> ${svc.status}`)}
+                ${drawerRow('Внутренний порт', svc.assigned_port || '—')}
+                ${drawerRow('Версия', escapeHTML(svc.artifact.version_tag))}
+                ${drawerRow('Из приложения', escapeHTML(svc.blueprint_name || '—'))}
+            </div>
+            <div class="stat-grid"><div class="stat-card"><div class="stat-card-label">CPU</div><div class="stat-card-value" id="drwCpu">${online ? '…' : 'N/A'}</div></div><div class="stat-card"><div class="stat-card-label">Memory</div><div class="stat-card-value" id="drwMem">${online ? '…' : 'N/A'}</div></div></div>
+            <div class="section-title">Управление</div>
+            <div class="drawer-toolbar">
+                <button class="tool-btn" id="drwOpen" title="Открыть в браузере"><span class="material-symbols-outlined">open_in_new</span></button>
+                <button class="tool-btn" id="drwStart" ${online ? 'disabled' : ''} title="Запустить"><span class="material-symbols-outlined">play_arrow</span></button>
+                <button class="tool-btn" id="drwStop" ${online ? '' : 'disabled'} title="Остановить"><span class="material-symbols-outlined">stop</span></button>
+                <button class="tool-btn" id="drwRestart" ${online ? '' : 'disabled'} title="Перезапустить"><span class="material-symbols-outlined">refresh</span></button>
+                <button class="tool-btn" id="drwRedeploy" title="Обновить / Откатить версию"><span class="material-symbols-outlined">cached</span></button>
+                <button class="tool-btn" id="drwConfig" title="Настройки сборки и рантайма"><span class="material-symbols-outlined">tune</span></button>
+                <button class="tool-btn" id="drwPublish" ${online ? '' : 'disabled'} title="Опубликовать (публичный домен)"><span class="material-symbols-outlined">public</span></button>
+                <span class="drawer-toolbar-sep"></span>
+                <button class="tool-btn danger" id="drwDelete" title="Удалить сервис"><span class="material-symbols-outlined">delete</span></button>
+            </div>
+            <div class="section-title">Масштаб (реплики)</div>
+            <div class="scale-row">
+                <span class="mono scale-status" title="online / желаемое">${svc.online_count ?? 0}/${svc.target_replicas ?? 1} online</span>
+                <input type="number" class="field-input" id="drwReplicas" min="0" max="20" value="${svc.target_replicas ?? 1}">
+                <button class="btn-icon-label" id="drwScale"><span class="material-symbols-outlined">done</span>Применить</button>
+            </div>
+            <div id="drwDiag"></div>
+            <div class="section-title">Консоль (последние строки)</div>
+            <div class="log-window" id="drwLogs" style="height:200px;">Загрузка логов…</div>
+            <div class="action-row" style="margin-top:16px;"><button class="btn-icon-label" id="drwGoto"><span class="material-symbols-outlined">arrow_forward</span>Перейти в Сервисы</button></div>`;
+        document.getElementById('drwGoto').onclick = () => goToLevel('services');
+        wireServiceOpenButton(document.getElementById('drwOpen'), svc);
+        // Действие НЕ закрывает drawer (как было) — обновляем список под ним и перерисовываем
+        // сам drawer свежими данными (видно смену статуса/кнопок + живые логи продолжаются).
+        const afterAction = () => { invalidateCache('services', 'systemMetrics'); refreshServiceListIfOpen(); openDetailDrawer('svc', id); };
+        const afterDelete = () => { invalidateCache('services', 'systemMetrics'); refreshServiceListIfOpen(); closeDrawer(); };
+        const act = (action, msg) => postJSON(null, `/api/services/${id}/${action}`, null, msg, afterAction);
+        document.getElementById('drwStart').onclick = () => act('start', 'Запуск…');
+        document.getElementById('drwStop').onclick = () => act('stop', 'Остановка…');
+        document.getElementById('drwRestart').onclick = () => act('restart', 'Перезапуск…');
+        document.getElementById('drwRedeploy').onclick = () => { closeDrawer(); showModal('redeployModal', () => prepareRedeployModal(svc)); };
+        document.getElementById('drwConfig').onclick = () => { closeDrawer(); showModal('configModal', () => prepareConfigModal(svc)); };
+        document.getElementById('drwPublish').onclick = () => { closeDrawer(); showModal('applicationModal', () => prepareApplicationModal({ serviceId: svc.id })); };
+        document.getElementById('drwDelete').onclick = () => { if (confirm(`Удалить сервис «${svc.name}»? Контейнер будет удалён.`)) deleteJSON(`/api/services/${id}`, 'Сервис удалён.', afterDelete); };
+        document.getElementById('drwScale').onclick = () => { const n = parseInt(document.getElementById('drwReplicas').value, 10); if (Number.isNaN(n)) return; postJSON(null, `/api/services/${id}/scale`, { target_replicas: n }, `Масштаб → ${n} реплик(и)`, afterAction); };
+        if (online) authGet(`/api/services/${id}/stats`).then(s => { const c = document.getElementById('drwCpu'); if (c) { c.textContent = `${s.cpu_percent}%`; document.getElementById('drwMem').textContent = `${s.memory_usage_mb} MB`; } }).catch(() => {});
+        // Логи и диагностику тянем всегда — в т.ч. для failed/offline (почему умер/не запускается).
+        authGet(`/api/services/${id}/logs`).then(d => {
+            const log = document.getElementById('drwLogs'); if (log) log.textContent = d.logs || 'Логи пусты.';
+            const diag = document.getElementById('drwDiag');
+            if (diag && svc.status !== 'online') {
+                const bits = [];
+                if (d.status === 'build_failed') bits.push('⚠ Образ не собрался — причина в логе ниже.');
+                else if (d.exit_code != null) bits.push(`Контейнер завершился с кодом <span class="mono">${d.exit_code}</span>.`);
+                if (d.restart_count) bits.push(`Попыток перезапуска до отказа: ${d.restart_count}.`);
+                if (bits.length) diag.innerHTML = `<div class="diag-box">${bits.join('<br>')}</div>`;
+            }
+        }).catch(() => { const log = document.getElementById('drwLogs'); if (log) log.textContent = 'Не удалось загрузить логи.'; });
+    }
+
+    async function renderAppDrawer(id, title, body) {
+        const [apps, services] = await Promise.all([fetchData('applications', '/api/applications'), fetchData('services', '/api/services')]);
+        const app = apps.find(a => a.id === id);
+        if (!app) { body.innerHTML = 'Не найдено.'; return; }
+        const svc = services.find(s => s.id === app.service.id);
+        const proto = app.ssl_cert_name ? 'https' : 'http';
+        title.innerHTML = `<span class="material-symbols-outlined">${app.ssl_cert_name ? 'lock' : 'public'}</span>${escapeHTML(app.name)}`;
+        body.innerHTML = `
+            <div class="detail-chain">
+                ${drawerRow('Тип', 'Приложение (публичный домен)')}
+                ${drawerRow('Домен', `<a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a>`)}
+                ${drawerRow('SSL', app.ssl_cert_name ? '🔒 ' + escapeHTML(app.ssl_cert_name) : '❌ HTTP')}
+                ${drawerRow('Сервис', `<span class="status-dot ${svc ? svc.status : 'offline'}"></span> <span class="mono">${escapeHTML(app.service.name)}</span>${svc ? ` · :${svc.assigned_port}` : ''}`)}
+                ${drawerRow('Версия', svc ? escapeHTML(svc.artifact.version_tag) : '—')}
+                ${drawerRow('Пользователи (protected)', (app.users || []).length)}
+            </div>
+            <div class="section-title">Управление</div>
+            <div class="drawer-toolbar">
+                <a class="tool-btn" href="${proto}://${app.domain}" target="_blank" title="Открыть домен"><span class="material-symbols-outlined">open_in_new</span></a>
+                <button class="tool-btn" id="drwEdit" title="Редактировать (домен / SSL)"><span class="material-symbols-outlined">edit</span></button>
+                ${app.ssl_cert_name ? '' : `<button class="tool-btn" id="drwSsl" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span></button>`}
+                <span class="drawer-toolbar-sep"></span>
+                <button class="tool-btn danger" id="drwDelete" title="Удалить (снять с публикации)"><span class="material-symbols-outlined">delete</span></button>
+            </div>
+            <div class="action-row" style="margin-top:16px;"><button class="btn-icon-label" id="drwGoto"><span class="material-symbols-outlined">arrow_forward</span>Перейти в Приложения</button></div>`;
+        document.getElementById('drwGoto').onclick = () => goToLevel('applications');
+        document.getElementById('drwEdit').onclick = () => { closeDrawer(); openEditApplicationModal(app); };
+        const sslBtn = document.getElementById('drwSsl');
+        if (sslBtn) sslBtn.onclick = () => { closeDrawer(); handleIssueAppSsl(app.id, app.domain); };
+        document.getElementById('drwDelete').onclick = () => { if (confirm(`Удалить приложение (снять с публикации) «${app.name}»?`)) deleteJSON(`/api/applications/${app.id}`, 'Приложение удалено.', () => { invalidateCache('applications', 'systemMetrics'); closeDrawer(); }); };
+    }
+
     // --- Инициализация Страниц ---
-    const initBlueprintsPage = () => { document.getElementById('newBlueprintBtn').onclick = handleNewBlueprint; document.getElementById('uploadArtifactForm').addEventListener('submit', handleUploadArtifact); loadAndDisplayBlueprints(); };
-    const initServicesPage = () => { document.getElementById('newServiceBtn').onclick = () => showModal('serviceModal', prepareServiceModal); document.getElementById('serviceForm').addEventListener('submit', handleCreateService); document.getElementById('redeployForm').addEventListener('submit', handleRedeployService); document.getElementById('closeDetailsBtn').onclick = closeDetails; loadAndDisplayServices(); };
-    const initApplicationsPage = () => { document.getElementById('newAppBtn').onclick = () => showModal('applicationModal', prepareApplicationModal); document.getElementById('applicationForm').addEventListener('submit', handleCreateApplication); loadAndDisplayApplications(); };
-    const initSslPage = () => { document.getElementById('checkDnsForm').addEventListener('submit', handleDnsCheck); document.getElementById('uploadCertForm').addEventListener('submit', handleCertUpload); document.getElementById('issueSslForm').addEventListener('submit', handleSslIssue); loadAndDisplayCerts(); };
-    const initSettingsPage = async () => { document.getElementById('createGroupForm').addEventListener('submit', handleCreateGroup); const panelForm = document.getElementById('panelSettingsForm'); const certSelect = panelForm.querySelector('select[name="ssl_cert_name"]'); const settings = await fetchData('panelSettings', '/api/panel/settings'); panelForm.elements.domain.value = settings.domain || ''; const certs = await fetchData('certs', '/api/ssl/certificates'); populateSelect(certSelect, certs, c => c.name, c => c.name, true); certSelect.value = settings.ssl_cert_name || ''; panelForm.onsubmit = async (e) => { e.preventDefault(); const data = formToJSON(panelForm); data.ssl_cert_name = data.ssl_cert_name || null; data.domain = data.domain || null; await postJSON(panelForm, '/api/panel/settings', data, "Настройки панели сохранены! Nginx перезагружается...", () => { if (data.domain && data.domain !== window.location.hostname) { alert(`Внимание! Панель теперь будет доступна по адресу: http${data.ssl_cert_name ? 's':''}://${data.domain}`); } }); }; loadAndDisplayGroups(); };
+    const initBlueprintsPage = () => { document.getElementById('newBlueprintBtn').onclick = () => openBlueprintModal(); document.getElementById('blueprintForm').onsubmit = handleBlueprintSubmit; const upForm = document.getElementById('uploadArtifactForm'); upForm.onsubmit = handleUploadArtifact; upForm.elements.zip_file.onchange = handleArtifactFileSelected; loadAndDisplayBlueprints(); };
+    const initServicesPage = () => { document.getElementById('newServiceBtn').onclick = () => showModal('serviceModal', () => prepareServiceModal()); document.getElementById('serviceForm').onsubmit = handleCreateService; document.getElementById('redeployForm').onsubmit = handleRedeployService; loadAndDisplayServices(); };
+    const initApplicationsPage = () => { document.getElementById('newAppBtn').onclick = () => showModal('applicationModal', () => prepareApplicationModal()); document.getElementById('applicationForm').onsubmit = handleCreateApplication; document.getElementById('editApplicationForm').onsubmit = handleEditApplication; loadAndDisplayApplications(); };
+    const initSslPage = () => { document.getElementById('uploadCertForm').onsubmit = handleCertUpload; const issueForm = document.getElementById('issueSslForm'); issueForm.onsubmit = handleSslIssue; attachDnsCheck(issueForm.elements.domain); loadAndDisplayCerts(); };
+    // Баннер первичного доступа (ADR-014): пока домен не задан, панель открыта по
+    // IP:7999 — подсказываем задать домен и закрыть доступ после онбординга.
+    const renderFirstAccessBanner = (domain) => {
+        const el = document.getElementById('firstAccessBanner');
+        if (!el) return;
+        if (domain) { el.innerHTML = ''; return; }
+        el.innerHTML = `
+            <div class="banner-warn">
+                <span class="material-symbols-outlined">lock_open</span>
+                <div>
+                    <strong>Первичный доступ открыт по IP</strong>
+                    <p>Панель сейчас доступна по голому IP без HTTPS. Задайте домен и SSL ниже, затем закройте первичный доступ на сервере:</p>
+                    <code>sh /opt/exosystem-deployer/close-initial-access.sh</code>
+                </div>
+            </div>`;
+    };
+
+    const initSettingsPage = async () => {
+        document.getElementById('createGroupForm').onsubmit = handleCreateGroup;
+        const panelForm = document.getElementById('panelSettingsForm');
+        const certSelect = panelForm.querySelector('select[name="ssl_cert_name"]');
+        const modeSelect = document.getElementById('panelSslMode');
+        const existingGroup = document.getElementById('panelSslExistingGroup');
+        const issueHint = document.getElementById('panelSslIssueHint');
+        attachDnsCheck(panelForm.elements.domain);
+
+        const settings = await fetchData('panelSettings', '/api/panel/settings');
+        panelForm.elements.domain.value = settings.domain || '';
+        renderFirstAccessBanner(settings.domain);
+        const certs = await fetchData('certs', '/api/ssl/certificates');
+        populateSelect(certSelect, certs, c => c.name, c => c.name, true);
+        certSelect.value = settings.ssl_cert_name || '';
+
+        // Режим SSL: none / issue (выпустить сейчас) / existing. Начальный — по текущим настройкам.
+        modeSelect.value = settings.ssl_cert_name ? 'existing' : 'none';
+        const syncSslMode = () => {
+            existingGroup.style.display = modeSelect.value === 'existing' ? 'block' : 'none';
+            issueHint.style.display = modeSelect.value === 'issue' ? 'block' : 'none';
+            certSelect.required = modeSelect.value === 'existing';
+        };
+        modeSelect.onchange = syncSslMode;
+        syncSslMode();
+
+        panelForm.onsubmit = (e) => handlePanelSettingsSubmit(e, panelForm);
+        loadAndDisplayGroups();
+
+        document.getElementById('githubConnectForm').onsubmit = handleGithubConnect;
+        document.getElementById('githubDisconnectBtn').onclick = handleGithubDisconnect;
+        loadGithubIntegration();
+    };
+
+    // --- Интеграция GitHub (ADR-033): подключение PAT + статус ---
+    async function loadGithubIntegration() {
+        const statusEl = document.getElementById('githubStatus');
+        const disconnectBtn = document.getElementById('githubDisconnectBtn');
+        if (!statusEl) return;
+        invalidateCache('githubStatus');
+        try {
+            const status = await fetchData('githubStatus', '/api/integrations/github');
+            if (status.connected) {
+                statusEl.innerHTML = `<span style="color:var(--success)">✅ Подключено: <strong>${escapeHTML(status.login || '')}</strong> <span class="mono">(${escapeHTML(status.masked_token || '')})</span></span>`;
+                disconnectBtn.style.display = 'inline-flex';
+            } else {
+                statusEl.innerHTML = `<span>Не подключено.</span>`;
+                disconnectBtn.style.display = 'none';
+            }
+        } catch (_) { statusEl.textContent = 'Ошибка загрузки статуса.'; }
+    }
+    async function handleGithubConnect(e) {
+        e.preventDefault();
+        const form = e.target;
+        const token = form.elements.token.value.trim();
+        if (!token) { alert('Введите токен.'); return; }
+        await postJSON(form, '/api/integrations/github', { token }, "GitHub подключён!", () => {
+            form.reset();
+            invalidateCache('githubStatus', 'githubRepos');
+            loadGithubIntegration();
+        });
+    }
+    function handleGithubDisconnect() {
+        if (!confirm('Отключить GitHub-аккаунт? Импорт приватных репозиториев станет недоступен.')) return;
+        deleteJSON('/api/integrations/github', 'GitHub отключён.', () => {
+            invalidateCache('githubStatus', 'githubRepos');
+            loadGithubIntegration();
+        });
+    }
+
+    // Бесшовно: домен + (опц.) сертификат одним действием. Для «issue»: DNS-чек →
+    // сохранить домен по HTTP (чтобы nginx отвечал на :80 для ACME-челленджа) →
+    // выпустить сертификат (WS-лог) → сохранить с HTTPS.
+    async function handlePanelSettingsSubmit(e, panelForm) {
+        e.preventDefault();
+        const domain = (panelForm.elements.domain.value || '').trim() || null;
+        const mode = document.getElementById('panelSslMode').value;
+        const btn = panelForm.querySelector('button[type="submit"]');
+        if (!domain && mode !== 'none') { alert('Укажите домен панели для выпуска/привязки SSL.'); return; }
+
+        let sslCertName = null;
+        if (mode === 'existing') {
+            sslCertName = panelForm.elements.ssl_cert_name.value || null;
+        } else if (mode === 'issue') {
+            const dnsStatus = document.getElementById('panelDnsStatus');
+            const logWindow = document.getElementById('panelSslLogWindow');
+            btn.disabled = true;
+            try {
+                dnsStatus.textContent = 'Проверка DNS...';
+                const dns = await checkDns(domain);
+                if (!dns.matches) {
+                    dnsStatus.innerHTML = `<span style="color:var(--danger)">A-запись не указывает на сервер (сервер: ${dns.server_ip || 'N/A'}, домен: ${dns.domain_ip || 'N/A'}). Выпуск невозможен.</span>`;
+                    btn.disabled = false; return;
+                }
+                dnsStatus.innerHTML = `<span style="color:var(--success)">DNS OK. Готовлю домен и выпускаю сертификат...</span>`;
+                // 1) Домен по HTTP — чтобы webroot-челлендж резолвился на этом домене.
+                await postJSON(null, '/api/panel/settings', { domain, ssl_cert_name: null }, null, null);
+                // 2) Выпуск Let's Encrypt (живой лог).
+                await issueSslForDomain(domain, logWindow);
+                sslCertName = domain;
+            } catch (err) {
+                alert(`Не удалось выпустить SSL: ${err.message}\nДомен сохранён по HTTP — можно повторить выпуск позже.`);
+                invalidateCache('panelSettings', 'certs'); renderFirstAccessBanner(domain);
+                btn.disabled = false; return;
+            }
+            btn.disabled = false;
+        }
+
+        await postJSON(panelForm, '/api/panel/settings', { domain, ssl_cert_name: sslCertName }, "Настройки панели применены! Nginx перезагружается...", () => {
+            invalidateCache('panelSettings', 'certs');
+            renderFirstAccessBanner(domain);
+            if (domain && domain !== window.location.hostname) {
+                const url = `${sslCertName ? 'https' : 'http'}://${domain}`;
+                alert(`Панель теперь доступна по адресу: ${url}` + (sslCertName ? `\n\nГотово! Не забудьте закрыть первичный доступ (порт 7999) на сервере:\nsh /opt/exosystem-deployer/close-initial-access.sh` : ''));
+            }
+        });
+    }
 
     // --- Универсальные функции ---
     async function handleApiRequest(form, url, options, successMsg, callback) {
@@ -183,6 +999,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (successMsg) alert(successMsg);
             if (callback) callback();
+            maybeRefreshDashboard(options.method);
 
             return json_body;
         } catch (err) {
@@ -208,41 +1025,681 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const invalidateCache = (...keys) => { keys.forEach(key => CACHE[key] = null); };
     const escapeHTML = str => str?.toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '';
+    // Русское склонение по числу: forms = [1, 2-4, 5+] (напр. ['версия','версии','версий']).
+    const pluralRu = (n, forms) => { const a = Math.abs(n) % 100, b = a % 10; if (a > 10 && a < 20) return forms[2]; if (b > 1 && b < 5) return forms[1]; if (b === 1) return forms[0]; return forms[2]; };
+    // Навешивает toggle на kebab-кнопку дропдауна (закрывает остальные открытые меню).
+    // Переиспользует существующий паттерн `.dropdown`/`.dropdown-menu`/`data-toggle="dropdown"`.
+    function wireDropdown(dd) {
+        const toggle = dd.querySelector('[data-toggle="dropdown"]');
+        const menu = dd.querySelector('.dropdown-menu');
+        if (!toggle || !menu) return;
+        toggle.addEventListener('click', e => {
+            e.stopPropagation();
+            const open = menu.classList.contains('show');
+            document.querySelectorAll('.dropdown-menu.show').forEach(m => m.classList.remove('show'));
+            if (!open) menu.classList.add('show');
+        });
+    }
     const populateSelect = (select, items, textFn, valueFn, keepFirst = false) => { select.innerHTML = keepFirst ? select.firstElementChild.outerHTML : '<option value="" disabled selected>Выберите...</option>'; items.forEach(item => { const opt = document.createElement('option'); opt.textContent = textFn(item); opt.value = valueFn(item); select.appendChild(opt); }); };
     const formToJSON = form => Object.fromEntries(new FormData(form).entries());
-    const postJSON = (form, url, data, successMsg, callback) =>
-        handleApiRequest(form, url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }, successMsg, callback);    const postForm = (form, url, formData, successMsg, callback) => handleApiRequest(form, url, { method: 'POST', body: formData }, successMsg, callback);
+    const postJSON = (form, url, data, successMsg, callback, method = 'POST') =>
+        handleApiRequest(form, url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }, successMsg, callback);
+    const postForm = (form, url, formData, successMsg, callback) => handleApiRequest(form, url, { method: 'POST', body: formData }, successMsg, callback);
     const deleteJSON = (url, successMsg, callback) => handleApiRequest(null, url, { method: 'DELETE' }, successMsg, callback);
 
     // --- Функции для каждой страницы (без изменений в логике, т.к. handleApiRequest всё делает) ---
-    async function loadAndDisplayBlueprints() { const container = document.getElementById('blueprintsList'); try { const blueprints = await fetchData('blueprints', '/api/blueprints'); if (blueprints.length === 0) { container.innerHTML = `<p style="color:var(--text-secondary)">Библиотека пуста. Нажмите "Создать приложение", чтобы добавить первое.</p>`; return; } container.innerHTML = blueprints.map(bp => `<div class="settings-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;"><h3 style="margin:0;">${escapeHTML(bp.name)}</h3><button class="btn btn-secondary upload-artifact-btn" data-id="${bp.id}" data-name="${escapeHTML(bp.name)}"><span class="material-symbols-outlined" style="font-size:18px">upload</span> Загрузить</button></div><p style="font-size:14px; color:var(--text-secondary); min-height:2em;">${escapeHTML(bp.description) || ''}</p><h5 style="margin-top:16px; margin-bottom:8px; font-size:13px; color:var(--text-secondary)">ВЕРСИИ (${bp.artifacts.length})</h5>${bp.artifacts.length > 0 ? `<ul style="list-style-type:none; font-size:14px;">${[...bp.artifacts].reverse().slice(0, 5).map(art => `<li style="padding:4px 0; border-bottom:1px solid var(--border)"><span class="mono">${escapeHTML(art.version_tag)}</span> <span style="float:right; color:var(--text-secondary)">${new Date(art.created_at).toLocaleDateString()}</span></li>`).join('')}</ul>` : '<p style="font-size:14px; color:var(--text-secondary)">Нет загруженных версий.</p>'}</div>`).join(''); document.querySelectorAll('.upload-artifact-btn').forEach(btn => btn.onclick = () => { const form = document.getElementById('uploadArtifactForm'); form.elements.blueprint_id.value = btn.dataset.id; document.getElementById('uploadBlueprintName').value = btn.dataset.name; showModal('uploadArtifactModal'); }); } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки библиотеки.</p>`; } }
-    async function handleNewBlueprint() { const name = prompt("Имя приложения (a-z, 0-9, -):"); if (!name || !/^[a-z0-9-]+$/.test(name)) { if (name) alert("Неверный формат имени."); return; } const description = prompt("Краткое описание (необязательно):"); await postJSON(null, '/api/blueprints', { name, description }, "Приложение создано!", () => { invalidateCache('blueprints'); loadAndDisplayBlueprints(); }); }
-    async function handleUploadArtifact(e) { e.preventDefault(); const form = e.target; const blueprintId = form.elements.blueprint_id.value; await postForm(form, `/api/blueprints/${blueprintId}/artifacts`, new FormData(form), "Версия успешно загружена!", () => { hideModal('uploadArtifactModal'); invalidateCache('blueprints'); loadAndDisplayBlueprints(); }); }
-    async function loadAndDisplayServices() { const container = document.getElementById('servicesContainer'); try { const services = await fetchData('services', '/api/services'); container.innerHTML = `<div class="section-title">Все сервисы (${services.length})</div>`; if (services.length === 0) { container.innerHTML += '<p style="color:var(--text-secondary); padding: 16px 0;">Нет запущенных сервисов.</p>'; return; } services.forEach(srv => { const isOnline = srv.status === 'online'; const card = document.createElement('div'); card.className = 'service-card'; card.dataset.serviceData = JSON.stringify(srv); card.innerHTML = ` <div class="service-info"> <div class="status-dot ${srv.status}"></div> <div> <div class="service-name">${escapeHTML(srv.name)}</div> <div class="service-meta">Port: ${srv.assigned_port} &bull; v.${escapeHTML(srv.artifact.version_tag)}</div> </div> </div> <div class="service-actions"> <div class="dropdown"> <button class="icon-btn" data-toggle="dropdown"><span class="material-symbols-outlined">more_vert</span></button> <div class="dropdown-menu"> <div data-action="start" ${isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">play_arrow</span>Запустить</div> <div data-action="stop" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">stop</span>Остановить</div> <div data-action="restart" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">refresh</span>Перезапустить</div> <div class="dropdown-item" data-action="redeploy"><span class="material-symbols-outlined">cached</span>Обновить / Откатить</div> <hr style="border-color: var(--border); margin: 4px 8px;"> <div class="dropdown-item danger" data-action="delete"><span class="material-symbols-outlined">delete</span>Удалить сервис</div> </div> </div> </div>`; container.appendChild(card); card.addEventListener('click', e => { if (!e.target.closest('.service-actions')) openDetails(card, srv); }); const dropdownToggle = card.querySelector('[data-toggle="dropdown"]'); const dropdownMenu = card.querySelector('.dropdown-menu'); dropdownToggle.addEventListener('click', e => { e.stopPropagation(); document.querySelectorAll('.dropdown-menu.show').forEach(m => m !== dropdownMenu && m.classList.remove('show')); dropdownMenu.classList.toggle('show'); }); dropdownMenu.addEventListener('click', e => { e.stopPropagation(); const item = e.target.closest('.dropdown-item'); if (item && !item.classList.contains('disabled')) { handleServiceAction(item.dataset.action, srv, card); dropdownMenu.classList.remove('show'); } }); }); } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки сервисов.</p>`; } }
-    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); if (document.getElementById('detailsPanel').classList.contains('open')) closeDetails(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'delete': if (confirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`)) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); if (document.getElementById('detailsPanel').classList.contains('open')) closeDetails(); }); } break; } }
+    async function loadAndDisplayBlueprints() {
+        const container = document.getElementById('blueprintsList');
+        if (!container) return;  // вызвано вне стадии «Библиотека» (напр. из дашборда)
+        try {
+            const blueprints = await fetchData('blueprints', '/api/blueprints');
+            updateRailCount('blueprints');
+            if (blueprints.length === 0) { container.innerHTML = `<p style="color:var(--text-secondary)">Библиотека пуста. Нажмите "Создать приложение", чтобы добавить первое.</p>`; return; }
+
+            // Действия версии. Для последней версии — «Запустить» + kebab (скачать/удалить);
+            // в истории (compact) — компактные иконки (история живёт в overlay со скроллом,
+            // вложенный дропдаун там обрезался бы overflow'ом, поэтому иконки).
+            const versionActions = (art, bp, compact) => compact
+                ? `<button class="icon-btn run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">rocket_launch</span></button>
+                   <button class="icon-btn dl-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-name="${escapeHTML(bp.name)}" data-tag="${escapeHTML(art.version_tag)}" title="Скачать ZIP"><span class="material-symbols-outlined">download</span></button>
+                   <button class="icon-btn danger del-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-tag="${escapeHTML(art.version_tag)}" title="Удалить версию"><span class="material-symbols-outlined">delete</span></button>`
+                : `<button class="btn-icon-label run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">rocket_launch</span>Запустить</button>
+                   <div class="dropdown">
+                       <button class="icon-btn" data-toggle="dropdown" title="Ещё"><span class="material-symbols-outlined">more_vert</span></button>
+                       <div class="dropdown-menu">
+                           <div class="dropdown-item dl-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-name="${escapeHTML(bp.name)}" data-tag="${escapeHTML(art.version_tag)}"><span class="material-symbols-outlined">download</span>Скачать ZIP</div>
+                           <div class="dropdown-item danger del-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-tag="${escapeHTML(art.version_tag)}"><span class="material-symbols-outlined">delete</span>Удалить версию</div>
+                       </div>
+                   </div>`;
+            // Строка версии: тег/дата слева (усекается при нехватке места), действия справа.
+            const versionRow = (art, bp, { latest = false, compact = false } = {}) => `
+                <li class="lib-version${latest ? ' latest' : ''}"${art.description ? ` title="${escapeHTML(art.description)}"` : ''}>
+                    <div class="lib-version-info">
+                        <span class="mono">${escapeHTML(art.version_tag)}</span>
+                        ${latest ? '<span class="lib-badge-latest">последняя</span>' : ''}
+                        <span class="lib-version-date">${new Date(art.created_at).toLocaleDateString()}</span>
+                        ${art.description ? '<span class="material-symbols-outlined lib-version-note" title="' + escapeHTML(art.description) + '">notes</span>' : ''}
+                    </div>
+                    <div class="lib-version-actions">${versionActions(art, bp, compact)}</div>
+                </li>`;
+
+            container.innerHTML = blueprints.map(bp => {
+                const arts = [...bp.artifacts].reverse();  // новые сверху
+                let versionsBlock;
+                if (arts.length === 0) {
+                    versionsBlock = '<p class="lib-empty">Нет загруженных версий. Нажмите «Загрузить версию».</p>';
+                } else {
+                    // Показываем только последнюю версию; историю — во ВСПЛЫВАЮЩЕМ overlay
+                    // (position:absolute), чтобы раскрытие не меняло размер карточки и не
+                    // дёргало интерфейс.
+                    const [latest, ...rest] = arts;
+                    const restBlock = rest.length ? `
+                        <div class="lib-history">
+                            <button type="button" class="lib-versions-toggle" data-toggle-versions><span class="material-symbols-outlined">expand_more</span><span class="lvt-text">Ещё версий: ${rest.length}</span></button>
+                            <ul class="lib-versions-rest" hidden>${rest.map(a => versionRow(a, bp, { compact: true })).join('')}</ul>
+                        </div>` : '';
+                    versionsBlock = `<ul class="lib-versions">${versionRow(latest, bp, { latest: true })}</ul>${restBlock}`;
+                }
+                return `<div class="settings-card lib-card">
+                    <div class="lib-card-head">
+                        <div class="lib-card-title">
+                            <h3>${escapeHTML(bp.name)}</h3>
+                            <span class="lib-versions-count">${bp.artifacts.length} ${pluralRu(bp.artifacts.length, ['версия', 'версии', 'версий'])}</span>
+                        </div>
+                        <div class="lib-card-actions">
+                            <button class="btn-icon-label upload-artifact-btn" data-id="${bp.id}" data-name="${escapeHTML(bp.name)}"><span class="material-symbols-outlined">upload</span>Загрузить версию</button>
+                            <div class="dropdown">
+                                <button class="icon-btn" data-toggle="dropdown" title="Действия с приложением"><span class="material-symbols-outlined">more_vert</span></button>
+                                <div class="dropdown-menu">
+                                    <div class="dropdown-item edit-bp-btn" data-id="${bp.id}" data-name="${escapeHTML(bp.name)}" data-desc="${escapeHTML(bp.description || '')}"><span class="material-symbols-outlined">edit</span>Редактировать</div>
+                                    <div class="dropdown-item danger del-bp-btn" data-id="${bp.id}" data-name="${escapeHTML(bp.name)}"><span class="material-symbols-outlined">delete</span>Удалить приложение</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    ${bp.description ? `<p class="lib-card-desc">${escapeHTML(bp.description)}</p>` : ''}
+                    ${versionsBlock}
+                </div>`;
+            }).join('');
+
+            // Дропдауны (kebab) закрываются по клику на пункт; раскрытие истории версий.
+            container.querySelectorAll('.dropdown').forEach(wireDropdown);
+            container.querySelectorAll('.dropdown-menu').forEach(menu => menu.addEventListener('click', () => menu.classList.remove('show')));
+            const closeHistory = (list) => {
+                if (!list || list.hasAttribute('hidden')) return;
+                list.setAttribute('hidden', '');
+                const t = list.previousElementSibling;
+                if (t) { t.classList.remove('open'); const tx = t.querySelector('.lvt-text'); if (tx) tx.textContent = `Ещё версий: ${list.children.length}`; }
+            };
+            container.querySelectorAll('[data-toggle-versions]').forEach(btn => btn.onclick = () => {
+                const list = btn.nextElementSibling;
+                const willOpen = list.hasAttribute('hidden');
+                container.querySelectorAll('.lib-versions-rest').forEach(l => { if (l !== list) closeHistory(l); });  // одна история за раз
+                if (willOpen) { list.removeAttribute('hidden'); btn.classList.add('open'); btn.querySelector('.lvt-text').textContent = 'Скрыть историю'; }
+                else closeHistory(list);
+            });
+
+            container.querySelectorAll('.upload-artifact-btn').forEach(btn => btn.onclick = () => openUploadModal(btn.dataset.id, btn.dataset.name));
+            container.querySelectorAll('.edit-bp-btn').forEach(btn => btn.onclick = () => openBlueprintModal({ id: btn.dataset.id, name: btn.dataset.name, description: btn.dataset.desc }));
+            container.querySelectorAll('.del-bp-btn').forEach(btn => btn.onclick = () => handleBlueprintDelete(btn.dataset.id, btn.dataset.name));
+            container.querySelectorAll('.dl-artifact-btn').forEach(btn => btn.onclick = () => handleArtifactDownload(btn.dataset.bpId, btn.dataset.artId, `${btn.dataset.name}-${btn.dataset.tag}.zip`));
+            container.querySelectorAll('.del-artifact-btn').forEach(btn => btn.onclick = () => handleArtifactDelete(btn.dataset.bpId, btn.dataset.artId, btn.dataset.tag));
+            container.querySelectorAll('.run-service-btn').forEach(btn => btn.onclick = () => goToStage('services', () => showModal('serviceModal', () => prepareServiceModal({ blueprintId: btn.dataset.bpId, artifactId: btn.dataset.artId }))));
+        } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки библиотеки.</p>`; }
+    }
+    function openBlueprintModal(bp = null) {
+        const form = document.getElementById('blueprintForm');
+        form.reset();
+        document.getElementById('blueprintModalTitle').textContent = bp ? 'Редактировать приложение' : 'Создать приложение';
+        form.elements.blueprint_id.value = bp ? bp.id : '';
+        form.elements.name.value = bp ? bp.name : '';
+        form.elements.description.value = bp ? (bp.description || '') : '';
+        // При редактировании имя менять можно, но предупредим: оно используется в сервисах.
+        showModal('blueprintModal');
+    }
+    async function handleBlueprintSubmit(e) {
+        e.preventDefault();
+        const form = e.target;
+        const id = form.elements.blueprint_id.value;
+        const data = { name: form.elements.name.value, description: form.elements.description.value || null };
+        if (id) {
+            await postJSON(form, `/api/blueprints/${id}`, data, "Изменения сохранены!", () => { hideModal('blueprintModal'); invalidateCache('blueprints'); loadAndDisplayBlueprints(); }, 'PATCH');
+        } else {
+            await postJSON(form, '/api/blueprints', data, "Приложение создано!", () => { hideModal('blueprintModal'); invalidateCache('blueprints'); loadAndDisplayBlueprints(); });
+        }
+    }
+    async function handleBlueprintDelete(id, name) {
+        if (!confirm(`Удалить приложение "${name}" из библиотеки вместе со всеми версиями?\n\nНельзя удалить, если на него есть запущенные сервисы.`)) return;
+        await deleteJSON(`/api/blueprints/${id}`, "Приложение удалено.", () => { invalidateCache('blueprints'); loadAndDisplayBlueprints(); });
+    }
+    async function handleArtifactDelete(bpId, artId, tag) {
+        if (!confirm(`Удалить версию "${tag}"?\n\nНельзя удалить, если версия используется запущенным сервисом.`)) return;
+        await deleteJSON(`/api/blueprints/${bpId}/artifacts/${artId}`, "Версия удалена.", () => { invalidateCache('blueprints'); loadAndDisplayBlueprints(); });
+    }
+    // Генерирует уникальное имя на основе base, избегая занятых (existing — массив строк).
+    function uniqueName(base, existing) {
+        const taken = new Set((existing || []).filter(Boolean));
+        if (!taken.has(base)) return base;
+        let i = 2;
+        while (taken.has(`${base}-${i}`)) i++;
+        return `${base}-${i}`;
+    }
+    // При выборе ZIP — спросить сервер о предлагаемой версии и описании (из VERSION/CHANGELOG).
+    async function handleArtifactFileSelected(e) {
+        const fileInput = e.target;
+        const form = fileInput.form;
+        const file = fileInput.files[0];
+        if (!file) return;
+        const bpId = form.elements.blueprint_id.value;
+        const versionInput = form.elements.version_tag;
+        const descInput = form.elements.description;
+        const oldPh = versionInput.placeholder;
+        versionInput.placeholder = 'Анализ архива…';
+        try {
+            const fd = new FormData(); fd.append('zip_file', file);
+            const res = await fetch(`/api/blueprints/${bpId}/artifacts/inspect`, { method: 'POST', headers: { 'Authorization': `Bearer ${getToken()}` }, body: fd });
+            if (!res.ok) throw new Error();
+            const data = await res.json();
+            if (data.suggested_version && !versionInput.value) versionInput.value = data.suggested_version;
+            if (data.description && !descInput.value) descInput.value = data.description;
+        } catch (_) { /* тихо: подсказки необязательны */ }
+        finally { versionInput.placeholder = oldPh; }
+    }
+    // Открыть модалку добавления версии (общий путь: страница Библиотеки и drawer).
+    function openUploadModal(bpId, bpName) {
+        const form = document.getElementById('uploadArtifactForm');
+        form.reset();
+        form.elements.blueprint_id.value = bpId;
+        document.getElementById('uploadBlueprintName').value = bpName || '';
+        setUploadSource('zip');
+        showModal('uploadArtifactModal');
+    }
+    // Переключатель источника версии: ZIP-загрузка / импорт из GitHub.
+    function setUploadSource(src) {
+        const form = document.getElementById('uploadArtifactForm');
+        const tabs = document.getElementById('uploadSrcTabs');
+        if (!form || !tabs) return;
+        form.dataset.src = src;
+        tabs.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.src === src));
+        form.querySelectorAll('[data-src-panel]').forEach(p => p.classList.toggle('active', p.dataset.srcPanel === src));
+        if (src === 'github') loadGithubRepoPicker();
+    }
+    function wireUploadSourceTabs() {
+        const tabs = document.getElementById('uploadSrcTabs');
+        if (!tabs) return;
+        tabs.querySelectorAll('.tab').forEach(t => t.onclick = () => setUploadSource(t.dataset.src));
+        const select = document.getElementById('githubRepoSelect');
+        if (select) select.onchange = () => {
+            if (select.value) document.querySelector('#uploadArtifactForm [name="repo_url"]').value = `https://github.com/${select.value}`;
+        };
+    }
+    // Подставляет список репозиториев подключённого GitHub-аккаунта вместо ручного
+    // ввода URL (ADR-033). Без подключения — селект скрыт, поле URL работает как раньше.
+    async function loadGithubRepoPicker() {
+        const group = document.getElementById('githubRepoPickerGroup');
+        const select = document.getElementById('githubRepoSelect');
+        const hint = document.getElementById('githubSourceHint');
+        if (!group || !select) return;
+        try {
+            const status = await fetchData('githubStatus', '/api/integrations/github');
+            if (!status.connected) { group.style.display = 'none'; return; }
+            const repos = await fetchData('githubRepos', '/api/integrations/github/repos');
+            populateSelect(select, repos, r => r.full_name + (r.private ? ' 🔒' : ''), r => r.full_name, false);
+            group.style.display = 'block';
+            if (hint) hint.innerHTML = `GitHub подключён (<strong>${escapeHTML(status.login || '')}</strong>) — доступны и приватные репозитории. Если в репозитории есть свой <span class="mono">Dockerfile</span> — соберём по нему.`;
+        } catch (_) { group.style.display = 'none'; }
+    }
+
+    async function handleUploadArtifact(e) {
+        e.preventDefault();
+        const form = e.target;
+        const blueprintId = form.elements.blueprint_id.value;
+        const done = () => { hideModal('uploadArtifactModal'); invalidateCache('blueprints'); loadAndDisplayBlueprints(); };
+        if ((form.dataset.src || 'zip') === 'github') {
+            const repoUrl = form.elements.repo_url.value.trim();
+            if (!repoUrl) { alert('Укажите URL публичного GitHub-репозитория.'); return; }
+            const data = {
+                repo_url: repoUrl,
+                ref: form.elements.ref.value.trim() || null,
+                version_tag: form.elements.version_tag.value.trim() || null,
+                description: form.elements.description.value.trim() || null,
+            };
+            await postJSON(form, `/api/blueprints/${blueprintId}/artifacts/from-github`, data, "Версия импортирована из GitHub!", done);
+        } else {
+            if (!form.elements.zip_file.files.length) { alert('Выберите ZIP-архив с кодом.'); return; }
+            await postForm(form, `/api/blueprints/${blueprintId}/artifacts`, new FormData(form), "Версия успешно загружена!", done);
+        }
+    }
+
+    // Скачивание загруженной версии: authenticated fetch -> blob (JWT в заголовке,
+    // прямая ссылка <a> его не передаёт).
+    async function handleArtifactDownload(bpId, artId, filename) {
+        try {
+            const resp = await fetch(`/api/blueprints/${bpId}/artifacts/${artId}/download`, { headers: { 'Authorization': `Bearer ${getToken()}` } });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) { alert(`Ошибка скачивания: ${err.message}`); }
+    }
+    async function loadAndDisplayServices() { const container = document.getElementById('servicesContainer'); if (!container) return; try { const services = await fetchData('services', '/api/services'); updateRailCount('services'); container.innerHTML = `<div class="section-title">Все сервисы (${services.length})</div>`; if (services.length === 0) { container.innerHTML += '<p style="color:var(--text-secondary); padding: 16px 0;">Нет запущенных сервисов.</p>'; return; } services.forEach(srv => { const isOnline = srv.status === 'online'; const card = document.createElement('div'); card.className = 'service-card'; card.dataset.serviceData = JSON.stringify(srv); card.innerHTML = ` <div class="service-info"> <div class="status-dot ${srv.status}"></div> <div> <div class="service-name">${escapeHTML(srv.name)}</div> <div class="service-meta">Port: ${srv.assigned_port} &bull; ${escapeHTML(srv.artifact.version_tag)}</div> </div> </div> <div class="service-actions"> <div class="dropdown"> <button class="icon-btn" data-toggle="dropdown"><span class="material-symbols-outlined">more_vert</span></button> <div class="dropdown-menu"> <div data-action="start" ${isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">play_arrow</span>Запустить</div> <div data-action="stop" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">stop</span>Остановить</div> <div data-action="restart" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">refresh</span>Перезапустить</div> <div class="dropdown-item" data-action="redeploy"><span class="material-symbols-outlined">cached</span>Обновить / Откатить</div> <div class="dropdown-item" data-action="config"><span class="material-symbols-outlined">tune</span>Настройки сборки</div> <div data-action="publish" ${isOnline ? 'class="dropdown-item"' : 'class="dropdown-item disabled"'}><span class="material-symbols-outlined">public</span>Опубликовать</div> <hr style="border-color: var(--border); margin: 4px 8px;"> <div class="dropdown-item danger" data-action="delete"><span class="material-symbols-outlined">delete</span>Удалить сервис</div> </div> </div> </div>`; container.appendChild(card); card.addEventListener('click', e => { if (!e.target.closest('.service-actions')) openDetailDrawer('svc', srv.id); }); const dropdownToggle = card.querySelector('[data-toggle="dropdown"]'); const dropdownMenu = card.querySelector('.dropdown-menu'); dropdownToggle.addEventListener('click', e => { e.stopPropagation(); document.querySelectorAll('.dropdown-menu.show').forEach(m => m !== dropdownMenu && m.classList.remove('show')); dropdownMenu.classList.toggle('show'); }); dropdownMenu.addEventListener('click', e => { e.stopPropagation(); const item = e.target.closest('.dropdown-item'); if (item && !item.classList.contains('disabled')) { handleServiceAction(item.dataset.action, srv, card); dropdownMenu.classList.remove('show'); } }); }); } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки сервисов.</p>`; } }
+    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'config': showModal('configModal', () => prepareConfigModal(service)); break; case 'publish': goToStage('applications', () => showModal('applicationModal', () => prepareApplicationModal({ serviceId: service.id }))); break; case 'delete': if (confirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`)) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); }); } break; } }
     async function handleCreateService(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); data.artifact_id = parseInt(data.artifact_id); await postJSON(form, '/api/services', data, "Сервис успешно запущен!", () => { hideModal('serviceModal'); invalidateCache('services'); loadAndDisplayServices(); }); }
-    async function handleRedeployService(e) { e.preventDefault(); const form = e.target; const serviceId = form.elements.service_id.value; const data = { artifact_id: parseInt(form.elements.artifact_id.value) }; await postJSON(form, `/api/services/${serviceId}/redeploy`, data, "Сервис успешно обновлен!", () => { hideModal('redeployModal'); invalidateCache('services'); loadAndDisplayServices(); if (document.getElementById('detailsPanel').classList.contains('open')) closeDetails(); }); }
-    async function loadAndDisplayApplications() { const tableBody = document.querySelector('#appsTable tbody'); try { const apps = await fetchData('applications', '/api/applications'); if (apps.length === 0) { tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Нет опубликованных приложений.</td></tr>`; return; } tableBody.innerHTML = apps.map(app => `<tr><td>${escapeHTML(app.name)}</td><td><a href="https://${app.domain}" target="_blank">${app.domain}</a></td><td><span class="mono">${escapeHTML(app.service.name)}</span></td><td>${app.ssl_cert_name ? `✅ ${app.ssl_cert_name}` : '❌ HTTP'}</td><td><button class="icon-btn danger" data-app-id="${app.id}" data-app-name="${escapeHTML(app.name)}" title="Удалить (снять с публикации)"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-app-id]').forEach(btn => { btn.onclick = () => handleApplicationDelete(btn.dataset.appId, btn.dataset.appName); }); } catch (error) { if(getToken()) tableBody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Ошибка загрузки приложений.</td></tr>`; } }
+    // Потоковый редеплой с ЖИВЫМ WS-логом сборки (ADR-023). Зеркалит issueSslForDomain.
+    function streamRedeploy(serviceId, artifactId, logWindow) {
+        const append = (text) => { logWindow.style.display = 'block'; logWindow.innerHTML += `\n${escapeHTML(text)}`; logWindow.scrollTop = logWindow.scrollHeight; };
+        logWindow.style.display = 'block'; logWindow.innerHTML = '<span class="log-info">Запуск сборки новой версии…</span>';
+        return new Promise((resolve, reject) => {
+            postJSON(null, `/api/services/${serviceId}/redeploy-stream`, { artifact_id: artifactId })
+                .then(response => {
+                    const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/services/ws/redeploy/${response.task_id}`);
+                    ws.onmessage = (event) => { if (event.data === "CLOSE_CONNECTION") ws.close(); else append(event.data); };
+                    ws.onerror = () => { append('Ошибка WebSocket.'); reject(new Error('WS error')); };
+                    ws.onclose = () => resolve();
+                })
+                .catch(reject);
+        });
+    }
+    async function handleRedeployService(e) {
+        e.preventDefault();
+        const form = e.target;
+        const serviceId = form.elements.service_id.value;
+        const artifactId = parseInt(form.elements.artifact_id.value, 10);
+        const btn = form.querySelector('button[type="submit"]');
+        const logWindow = document.getElementById('redeployLogWindow');
+        btn.disabled = true;
+        try {
+            await streamRedeploy(serviceId, artifactId, logWindow);  // живой лог сборки; модалку не закрываем, чтобы прочитать итог
+        } catch (err) { /* лог уже показан */ }
+        finally {
+            btn.disabled = false;
+            invalidateCache('services'); loadAndDisplayServices();
+        }
+    }
+    async function loadAndDisplayApplications() {
+        const tableBody = document.querySelector('#appsTable tbody');
+        if (!tableBody) return;
+        try {
+            const apps = await fetchData('applications', '/api/applications');
+            updateRailCount('applications');
+            if (apps.length === 0) { tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Нет опубликованных приложений.</td></tr>`; return; }
+            tableBody.innerHTML = apps.map(app => {
+                const proto = app.ssl_cert_name ? 'https' : 'http';
+                const sslCell = app.ssl_cert_name ? `✅ ${escapeHTML(app.ssl_cert_name)}` : '❌ HTTP';
+                const issueBtn = app.ssl_cert_name ? '' : `<button class="btn-icon-label issue-app-ssl-btn" data-app-id="${app.id}" data-domain="${escapeHTML(app.domain)}" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span>Выпустить SSL</button>`;
+                return `<tr>
+                    <td>${escapeHTML(app.name)}</td>
+                    <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a></td>
+                    <td><span class="mono">${escapeHTML(app.service.name)}</span></td>
+                    <td>${sslCell}</td>
+                    <td><span class="action-row end">
+                        ${issueBtn}
+                        <button class="icon-btn edit-app-btn" data-app-id="${app.id}" title="Редактировать (домен/SSL)"><span class="material-symbols-outlined">edit</span></button>
+                        <button class="icon-btn danger del-app-btn" data-app-id="${app.id}" data-app-name="${escapeHTML(app.name)}" title="Удалить (снять с публикации)"><span class="material-symbols-outlined">delete</span></button>
+                    </span></td>
+                </tr>`;
+            }).join('');
+            tableBody.querySelectorAll('.del-app-btn').forEach(btn => btn.onclick = () => handleApplicationDelete(btn.dataset.appId, btn.dataset.appName));
+            tableBody.querySelectorAll('.edit-app-btn').forEach(btn => btn.onclick = () => openEditApplicationModal(apps.find(a => a.id == btn.dataset.appId)));
+            tableBody.querySelectorAll('.issue-app-ssl-btn').forEach(btn => btn.onclick = () => handleIssueAppSsl(btn.dataset.appId, btn.dataset.domain));
+        } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Ошибка загрузки приложений.</td></tr>`; }
+    }
     async function handleApplicationDelete(appId, appName) { if (!confirm(`Вы уверены, что хотите удалить приложение (снять с публикации) "${appName}"?\n\nЭто действие НЕ остановит работающий сервис, а только уберет публичный доступ к нему.`)) return; await deleteJSON(`/api/applications/${appId}`, "Приложение успешно удалено.", () => { invalidateCache('applications'); loadAndDisplayApplications(); }); }
-    async function handleCreateApplication(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); data.service_id = parseInt(data.service_id); data.ssl_cert_name = data.ssl_cert_name || null; await postJSON(form, '/api/applications', data, "Приложение успешно опубликовано!", () => { hideModal('applicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); }); }
+    async function openEditApplicationModal(app) {
+        const form = document.getElementById('editApplicationForm');
+        form.reset();
+        form.elements.app_id.value = app.id;
+        document.getElementById('editAppName').value = app.name;
+        form.elements.domain.value = app.domain;
+        attachDnsCheck(form.elements.domain);
+        const sslSelect = form.querySelector('select[name="ssl_cert_name"]');
+        const certs = await fetchData('certs', '/api/ssl/certificates');
+        populateSelect(sslSelect, certs, c => c.name, c => c.name, true);
+        sslSelect.value = app.ssl_cert_name || '';
+        showModal('editApplicationModal');
+    }
+    async function handleEditApplication(e) {
+        e.preventDefault();
+        const form = e.target;
+        const appId = form.elements.app_id.value;
+        const data = { domain: form.elements.domain.value, ssl_cert_name: form.elements.ssl_cert_name.value || null };
+        await postJSON(form, `/api/applications/${appId}`, data, "Приложение обновлено! Nginx перезагружается...", () => { hideModal('editApplicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); }, 'PATCH');
+    }
+    // Выпуск SSL для уже опубликованного приложения: DNS-чек → issue (WS-лог) → PATCH привязки.
+    async function handleIssueAppSsl(appId, domain) {
+        if (!confirm(`Выпустить Let's Encrypt сертификат для "${domain}"?\n\nУбедитесь, что A-запись домена указывает на этот сервер.`)) return;
+        try {
+            await issueSslForDomain(domain);
+            await postJSON(null, `/api/applications/${appId}`, { ssl_cert_name: domain }, "SSL выпущен и привязан!", () => { invalidateCache('applications', 'certs'); loadAndDisplayApplications(); }, 'PATCH');
+        } catch (err) { /* сообщение уже показано */ }
+    }
+    async function handleCreateApplication(e) {
+        e.preventDefault();
+        const form = e.target;
+        const raw = formToJSON(form);
+        const mode = raw.ssl_mode;
+        const domain = raw.domain;
+        const serviceId = parseInt(raw.service_id);
+        // Имя пусто → генерируем из имени сервиса (бэкенд требует имя для приложения).
+        let name = (raw.name || '').trim();
+        if (!name) {
+            const srv = (CACHE.services || []).find(s => s.id === serviceId);
+            name = uniqueName((srv && srv.name) || 'app', (CACHE.applications || []).map(a => a.name));
+        }
+        const data = { name, domain, service_id: serviceId, ssl_cert_name: null };
+
+        if (mode === 'existing') {
+            data.ssl_cert_name = raw.ssl_cert_name || null;
+        } else if (mode === 'issue') {
+            // Авто-SSL: DNS-чек → выпуск (WS-лог) → публикация с готовым сертификатом.
+            const btn = form.querySelector('button[type="submit"]');
+            const logWindow = document.getElementById('appSslLogWindow');
+            const dnsStatus = document.getElementById('appDnsStatus');
+            btn.disabled = true;
+            try {
+                dnsStatus.textContent = 'Проверка DNS...';
+                const dns = await checkDns(domain);
+                if (!dns.matches) {
+                    dnsStatus.innerHTML = `<span style="color:var(--danger)">A-запись не указывает на сервер (сервер: ${dns.server_ip || 'N/A'}, домен: ${dns.domain_ip || 'N/A'}). Выпуск невозможен.</span>`;
+                    btn.disabled = false;
+                    return;
+                }
+                dnsStatus.innerHTML = `<span style="color:var(--success)">DNS OK. Выпускаем сертификат...</span>`;
+                await issueSslForDomain(domain, logWindow);
+                data.ssl_cert_name = domain;
+            } catch (err) {
+                alert(`Не удалось выпустить SSL: ${err.message}. Приложение не опубликовано.`);
+                btn.disabled = false;
+                return;
+            }
+            btn.disabled = false;
+        }
+
+        await postJSON(form, '/api/applications', data, `Приложение опубликовано! Доступно: ${data.ssl_cert_name ? 'https' : 'http'}://${domain}`, () => { hideModal('applicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); });
+    }
     async function loadAndDisplayCerts() { const tableBody = document.querySelector('#certsTable tbody'); try { const certs = await fetchData('certs', '/api/ssl/certificates'); if (certs.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-secondary);">Сертификаты не найдены.</td></tr>`; return; } tableBody.innerHTML = certs.map(cert => `<tr><td><span class="mono">${escapeHTML(cert.name)}</span></td><td>${escapeHTML(cert.subject)}</td><td>${new Date(cert.not_after).toLocaleDateString()}</td><td><button class="icon-btn danger" data-cert-name="${escapeHTML(cert.name)}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-cert-name]').forEach(btn => { btn.onclick = () => handleCertDelete(btn.dataset.certName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="4" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
-    async function handleDnsCheck(e) { e.preventDefault(); const form = e.target; const domain = form.elements.domain.value; const resultDiv = document.getElementById('dnsResult'); resultDiv.innerHTML = 'Проверка...'; try { const response = await fetch(`/api/ssl/check-dns?domain=${encodeURIComponent(domain)}`, { headers: { 'Authorization': `Bearer ${getToken()}` } }); if(response.status === 401) { clearToken(); showLoginScreen(); return; } const data = await response.json(); const isGood = data.matches; resultDiv.innerHTML = `<div class="dns-result ${isGood ? 'dns-result-good':'dns-result-bad'}"><p>${isGood ? '<b>Отлично!</b> A-запись домена указывает на IP сервера.' : (data.error || '<b>Внимание!</b> A-запись домена не указывает на IP сервера.')}</p><p style="font-size:13px; color:var(--text-secondary); margin-top:8px;">IP сервера: ${data.server_ip || 'N/A'} | IP домена: ${data.domain_ip || 'N/A'}</p></div>`; } catch(err) { resultDiv.innerHTML = `<p style="color:var(--danger)">Ошибка проверки DNS.</p>`} }
+    async function checkDns(domain) {
+        const response = await fetch(`/api/ssl/check-dns?domain=${encodeURIComponent(domain)}`, { headers: { 'Authorization': `Bearer ${getToken()}` } });
+        if (response.status === 401) { clearToken(); showLoginScreen(); throw new Error('Session expired'); }
+        if (!response.ok) throw new Error('Ошибка проверки DNS');
+        return response.json();
+    }
+    // Живой DNS-индикатор прямо в поле домена (debounce). status = .dns-inline рядом с input.
+    function attachDnsCheck(input) {
+        if (!input) return;
+        const status = input.parentElement.querySelector('.dns-inline');
+        if (!status) return;
+        let timer = null;
+        input.oninput = () => {
+            clearTimeout(timer);
+            const domain = input.value.trim();
+            if (!domain || !domain.includes('.')) { status.className = 'dns-inline'; status.textContent = ''; return; }
+            status.className = 'dns-inline checking'; status.textContent = '⏳ Проверка DNS…';
+            timer = setTimeout(async () => {
+                try {
+                    const d = await checkDns(domain);
+                    if (d.matches) { status.className = 'dns-inline good'; status.textContent = `✅ Домен указывает на этот сервер (${d.server_ip || ''})`; }
+                    else { status.className = 'dns-inline bad'; status.textContent = `❌ Не указывает на сервер · домен: ${d.domain_ip || 'нет A-записи'} · сервер: ${d.server_ip || '?'}`; }
+                } catch (e) { status.className = 'dns-inline'; status.textContent = ''; }
+            }, 600);
+        };
+    }
     async function handleCertUpload(e) { e.preventDefault(); await postForm(e.target, '/api/ssl/certificates', new FormData(e.target), "Сертификат загружен!", () => { e.target.reset(); invalidateCache('certs'); loadAndDisplayCerts(); }); }
     async function handleCertDelete(certName) { if (!confirm(`Удалить сертификат "${certName}"?`)) return; await deleteJSON(`/api/ssl/certificates/${certName}`, "Сертификат удален.", () => { invalidateCache('certs'); loadAndDisplayCerts(); }); }
-    async function handleSslIssue(e) { e.preventDefault(); const form = e.target; const btn = form.querySelector('button[type="submit"]'); const domain = form.elements.domain.value; const logWindow = document.getElementById('sslLogWindow'); btn.disabled = true; logWindow.style.display = 'block'; logWindow.innerHTML = '<span class="log-info">Запуск процесса для ' + escapeHTML(domain) + '...</span>'; try { const response = await postJSON(form, '/api/ssl/issue', { domain: domain }); const { task_id } = response; const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ssl/ws/issue-ssl/${task_id}`); ws.onopen = () => logWindow.innerHTML += '\n<span class="log-success">Соединение с лог-сервером установлено.</span>'; ws.onmessage = (event) => { if (event.data === "CLOSE_CONNECTION") ws.close(); else { logWindow.innerHTML += `\n${escapeHTML(event.data)}`; logWindow.scrollTop = logWindow.scrollHeight; } }; ws.onclose = () => { logWindow.innerHTML += '\n<span class="log-success">Процесс завершен. Обновление списка...</span>'; btn.disabled = false; invalidateCache('certs'); loadAndDisplayCerts(); }; ws.onerror = (err) => { logWindow.innerHTML += '\n<span class="log-error">Ошибка WebSocket.</span>'; console.error("WebSocket Error:", err); btn.disabled = false; }; } catch (err) { logWindow.innerHTML += `\n<span class="log-error">Ошибка: ${err.message}</span>`; btn.disabled = false; } }
+    // Общий поток выпуска Let's Encrypt: POST /issue → WebSocket-лог → проверка появления
+    // сертификата. Резолвится при успехе, реджектится если сертификат не появился.
+    // logWindow — опциональный DOM-элемент для трансляции логов.
+    function issueSslForDomain(domain, logWindow = null) {
+        const append = (text, cls) => { if (!logWindow) return; logWindow.style.display = 'block'; logWindow.innerHTML += `\n${cls ? `<span class="log-${cls}">${escapeHTML(text)}</span>` : escapeHTML(text)}`; logWindow.scrollTop = logWindow.scrollHeight; };
+        if (logWindow) { logWindow.style.display = 'block'; logWindow.innerHTML = `<span class="log-info">Запуск выпуска для ${escapeHTML(domain)}...</span>`; }
+        return new Promise((resolve, reject) => {
+            postJSON(null, '/api/ssl/issue', { domain })
+                .then(response => {
+                    const { task_id } = response;
+                    const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ssl/ws/issue-ssl/${task_id}`);
+                    ws.onopen = () => append('Соединение с лог-сервером установлено.', 'success');
+                    ws.onmessage = (event) => { if (event.data === "CLOSE_CONNECTION") ws.close(); else append(event.data); };
+                    ws.onerror = (err) => { console.error("WebSocket Error:", err); append('Ошибка WebSocket.', 'error'); reject(new Error('Ошибка WebSocket при выпуске SSL.')); };
+                    ws.onclose = async () => {
+                        // Проверяем, что сертификат реально появился (certbot мог завершиться ошибкой).
+                        invalidateCache('certs');
+                        try {
+                            const certs = await fetchData('certs', '/api/ssl/certificates');
+                            if (certs.find(c => c.name === domain)) { append('Сертификат успешно выпущен.', 'success'); resolve(); }
+                            else { append('Сертификат не был выпущен (см. лог выше).', 'error'); reject(new Error('Сертификат не выпущен. Проверьте DNS и логи.')); }
+                        } catch (e) { reject(e); }
+                    };
+                })
+                .catch(reject);
+        });
+    }
+    async function handleSslIssue(e) {
+        e.preventDefault();
+        const form = e.target;
+        const btn = form.querySelector('button[type="submit"]');
+        const domain = form.elements.domain.value;
+        const logWindow = document.getElementById('sslLogWindow');
+        btn.disabled = true;
+        try { await issueSslForDomain(domain, logWindow); }
+        catch (err) { /* лог уже показан */ }
+        finally { btn.disabled = false; invalidateCache('certs'); loadAndDisplayCerts(); }
+    }
     async function loadAndDisplayGroups() { const tableBody = document.querySelector('#groupsTable tbody'); try { const groups = await fetchData('groups', '/api/groups'); if (groups.length === 0) { tableBody.innerHTML = `<tr><td colspan="3" style="text-align:center; color:var(--text-secondary);">Группы не созданы.</td></tr>`; return; } tableBody.innerHTML = groups.map(g => `<tr><td>${escapeHTML(g.name)}</td><td><span class="mono">${g.start_port} - ${g.end_port}</span></td><td><button class="icon-btn danger" data-group-id="${g.id}" data-group-name="${g.name}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-group-id]').forEach(btn => { btn.onclick = () => handleGroupDelete(btn.dataset.groupId, btn.dataset.groupName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="3" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
     async function handleCreateGroup(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); if (parseInt(data.start_port) >= parseInt(data.end_port)) { alert("Начальный порт должен быть меньше конечного."); return; } await postJSON(form, '/api/groups', data, "Группа создана!", () => { invalidateCache('groups'); loadAndDisplayGroups(); form.reset(); }); }
     async function handleGroupDelete(groupId, groupName) { if (!confirm(`Удалить группу "${groupName}"?`)) return; await deleteJSON(`/api/groups/${groupId}`, "Группа удалена.", () => { invalidateCache('groups'); loadAndDisplayGroups(); }); }
-    async function prepareServiceModal() { const form=document.getElementById('serviceForm'),bpSelect=form.querySelector('#select_blueprint'),artSelect=form.querySelector('select[name="artifact_id"]'),groupSelect=form.querySelector('select[name="group_name"]');const blueprints=await fetchData('blueprints','/api/blueprints');populateSelect(bpSelect,blueprints,bp=>bp.name,bp=>bp.id);bpSelect.onchange=()=>{const selectedBp=blueprints.find(bp=>bp.id==bpSelect.value);populateSelect(artSelect,selectedBp?selectedBp.artifacts.slice().reverse():[],art=>`${art.version_tag} (${new Date(art.created_at).toLocaleDateString()})`,art=>art.id);artSelect.dispatchEvent(new Event('change'))};const groups=await fetchData('groups','/api/groups');populateSelect(groupSelect,groups,g=>`${g.name} (${g.start_port}-${g.end_port})`,g=>g.name); }
-    async function prepareApplicationModal() { const form=document.getElementById('applicationModal'),serviceSelect=form.querySelector('select[name="service_id"]'),sslSelect=form.querySelector('select[name="ssl_cert_name"]');const services=await fetchData('services','/api/services');const onlineServices=services.filter(s=>s.status==='online');populateSelect(serviceSelect,onlineServices,srv=>`${srv.name} (Port: ${srv.assigned_port})`,srv=>srv.id);const certs=await fetchData('certs','/api/ssl/certificates');populateSelect(sslSelect,certs,cert=>cert.name,cert=>cert.name,true); }
-    async function prepareRedeployModal(service) { const form=document.getElementById('redeployForm');form.reset();form.elements.service_id.value=service.id;document.getElementById('redeployServiceName').value=service.name;document.getElementById('redeployCurrentVersion').value=service.artifact.version_tag;const artifactSelect=form.querySelector('select[name="artifact_id"]');artifactSelect.innerHTML='<option disabled selected>Загрузка версий...</option>';const blueprints=await fetchData('blueprints','/api/blueprints');const serviceBlueprint=blueprints.find(bp=>bp.id===service.artifact.blueprint_id);if(serviceBlueprint){const availableArtifacts=serviceBlueprint.artifacts.filter(art=>art.id!==service.artifact.id);populateSelect(artifactSelect,availableArtifacts.slice().reverse(),art=>`${art.version_tag} (${new Date(art.created_at).toLocaleDateString()})`,art=>art.id);}else{artifactSelect.innerHTML='<option disabled selected>Не удалось найти версии</option>';} }
-    function openDetails(card, service) { document.querySelectorAll('.service-card').forEach(c=>c.classList.remove('selected')); card.classList.add('selected'); const panel = document.getElementById('detailsPanel'); panel.dataset.serviceData = JSON.stringify(service); panel.classList.add('open'); panel.querySelector('#detName').textContent = service.name; panel.querySelector('#detStatus').textContent = `● ${service.status}`; panel.querySelector('#detArtifactInfo').textContent = `v.${escapeHTML(service.artifact.version_tag)}`; ['#statCpu','#statMemory','#logWindow'].forEach(sel=>panel.querySelector(sel).textContent='Загрузка...'); if(service.status==='online'){fetchData('stats',`/api/services/${service.id}/stats`).then(stats=>{panel.querySelector('#statCpu').textContent=`${stats.cpu_percent}%`;panel.querySelector('#statMemory').textContent=`${stats.memory_usage_mb} MB`;}).catch(()=>panel.querySelector('#statCpu').textContent='Ошибка');fetchData('logs', `/api/services/${service.id}/logs`).then(data=>{panel.querySelector('#logWindow').textContent=data.logs||'Логи пусты.';}).catch(()=>panel.querySelector('#logWindow').textContent='Не удалось загрузить.');} else{['#statCpu','#statMemory'].forEach(sel=>panel.querySelector(sel).textContent='N/A');panel.querySelector('#logWindow').textContent='Сервис остановлен.';} }
-    const closeDetails = () => { document.getElementById('detailsPanel').classList.remove('open'); document.querySelectorAll('.service-card').forEach(c=>c.classList.remove('selected')); };
-    const showModal = (id, prep) => { if (prep) prep().catch(err => console.error(`Modal prep failed for ${id}`, err)); document.getElementById(id).classList.add('show'); };
+    async function prepareServiceModal(prefill = null) {
+        const form = document.getElementById('serviceForm');
+        form.reset();
+        const bpSelect = form.querySelector('#select_blueprint'), artSelect = form.querySelector('select[name="artifact_id"]'), groupSelect = form.querySelector('select[name="group_name"]'), nameInput = form.elements.name;
+        delete nameInput.dataset.touched;
+        nameInput.oninput = () => { nameInput.dataset.touched = '1'; };
+        const blueprints = await fetchData('blueprints', '/api/blueprints');
+        const services = await fetchData('services', '/api/services');
+        populateSelect(bpSelect, blueprints, bp => bp.name, bp => bp.id);
+        const fillArtifacts = () => { const selectedBp = blueprints.find(bp => bp.id == bpSelect.value); populateSelect(artSelect, selectedBp ? selectedBp.artifacts.slice().reverse() : [], art => `${art.version_tag} (${new Date(art.created_at).toLocaleDateString()})`, art => art.id); };
+        // Автоген имени сервиса из имени приложения (если пользователь не редактировал поле).
+        const suggestName = () => { const bp = blueprints.find(b => b.id == bpSelect.value); if (bp && !nameInput.dataset.touched) nameInput.value = uniqueName(bp.name, (services || []).map(s => s.name)); };
+        bpSelect.onchange = () => { fillArtifacts(); suggestName(); };
+        const groups = await fetchData('groups', '/api/groups');
+        populateSelect(groupSelect, groups, g => `${g.name} (${g.start_port}-${g.end_port})`, g => g.name);
+        // Проброс контекста из Библиотеки: предвыбрать приложение и версию.
+        if (prefill && prefill.blueprintId) {
+            bpSelect.value = prefill.blueprintId;
+            fillArtifacts();
+            if (prefill.artifactId) artSelect.value = prefill.artifactId;
+        }
+        suggestName();
+        // Каждое открытие — расширенная сборка свёрнута (узкое окно), активен шаблон Python.
+        const modalEl = document.getElementById('serviceModal').querySelector('.modal');
+        modalEl.classList.remove('has-advanced');
+        const at = modalEl.querySelector('[data-toggle-advanced]'); if (at) at.setAttribute('aria-expanded', 'false');
+        modalEl.querySelectorAll('.preset-chip').forEach((c, i) => c.classList.toggle('active', i === 0));
+    }
+    async function prepareApplicationModal(prefill = null) {
+        const form = document.getElementById('applicationForm');
+        form.reset();
+        const serviceSelect = form.querySelector('select[name="service_id"]');
+        const sslSelect = form.querySelector('select[name="ssl_cert_name"]');
+        const nameInput = form.elements.name;
+        const modeSelect = document.getElementById('appSslMode');
+        const existingGroup = document.getElementById('appSslExistingGroup');
+        const issueHint = document.getElementById('appSslIssueHint');
+        const logWindow = document.getElementById('appSslLogWindow');
+
+        delete nameInput.dataset.touched;
+        nameInput.oninput = () => { nameInput.dataset.touched = '1'; };
+        attachDnsCheck(form.elements.domain);
+
+        const services = await fetchData('services', '/api/services');
+        const applications = await fetchData('applications', '/api/applications');
+        const onlineServices = services.filter(s => s.status === 'online');
+        populateSelect(serviceSelect, onlineServices, srv => `${srv.name} (Port: ${srv.assigned_port})`, srv => srv.id);
+        // Автоген имени приложения из имени выбранного сервиса.
+        const suggestName = () => { const srv = onlineServices.find(s => s.id == serviceSelect.value); if (srv && !nameInput.dataset.touched) nameInput.value = uniqueName(srv.name, (applications || []).map(a => a.name)); };
+        serviceSelect.onchange = suggestName;
+        if (prefill && prefill.serviceId) serviceSelect.value = prefill.serviceId;
+        suggestName();
+
+        const certs = await fetchData('certs', '/api/ssl/certificates');
+        populateSelect(sslSelect, certs, cert => cert.name, cert => cert.name, true);
+
+        // Переключение режима SSL: none / existing / issue.
+        modeSelect.value = 'none';
+        existingGroup.style.display = 'none';
+        issueHint.style.display = 'none';
+        if (logWindow) { logWindow.style.display = 'none'; logWindow.innerHTML = ''; }
+        modeSelect.onchange = () => {
+            existingGroup.style.display = modeSelect.value === 'existing' ? 'block' : 'none';
+            issueHint.style.display = modeSelect.value === 'issue' ? 'block' : 'none';
+            sslSelect.required = modeSelect.value === 'existing';
+        };
+    }
+    async function prepareRedeployModal(service) { const form=document.getElementById('redeployForm');form.reset();form.elements.service_id.value=service.id;document.getElementById('redeployServiceName').value=service.name;document.getElementById('redeployCurrentVersion').value=service.artifact.version_tag;const artifactSelect=form.querySelector('select[name="artifact_id"]');artifactSelect.innerHTML='<option disabled selected>Загрузка версий...</option>';const blueprints=await fetchData('blueprints','/api/blueprints');const serviceBlueprint=blueprints.find(bp=>bp.id===service.artifact.blueprint_id);if(serviceBlueprint){const currentId=service.artifact.id;const availableArtifacts=serviceBlueprint.artifacts.filter(art=>art.id!==currentId);
+        // Размечаем направление относительно текущей версии: новее (id больше) =
+        // обновление ↑, старее = откат ↓. id монотонен (артефакты создаются по порядку),
+        // поэтому надёжнее даты. Делает откат на старую версию явным (DoD «откатываться»).
+        const label=art=>`${art.version_tag} (${new Date(art.created_at).toLocaleDateString()}) — ${art.id>currentId?'↑ обновление':'↓ откат'}`;populateSelect(artifactSelect,availableArtifacts.slice().reverse(),label,art=>art.id);}else{artifactSelect.innerHTML='<option disabled selected>Не удалось найти версии</option>';} }
+    // Расширенный режим (Идея 2а): редактор конфига сборки/рантайма сервиса.
+    function prepareConfigModal(service) {
+        const form = document.getElementById('configForm');
+        form.reset();
+        form.elements.service_id.value = service.id;
+        form.elements.base_image.value = service.base_image || '';
+        form.elements.run_command.value = service.run_command || '';
+        form.elements.internal_port.value = (service.internal_port ?? 80);
+        form.elements.env_vars.value = Object.entries(service.env_vars || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+    }
+    async function handleServiceConfig(e) {
+        e.preventDefault();
+        const form = e.target;
+        const id = form.elements.service_id.value;
+        const data = {
+            base_image: form.elements.base_image.value,
+            run_command: form.elements.run_command.value,
+            internal_port: form.elements.internal_port.value === '' ? null : parseInt(form.elements.internal_port.value, 10),
+            env_vars: form.elements.env_vars.value,  // backend парсит KEY=VALUE построчно
+        };
+        await postJSON(form, `/api/services/${id}/config`, data, 'Конфиг применён, сервис пересоздаётся.', () => {
+            hideModal('configModal'); invalidateCache('services'); loadAndDisplayServices();
+        }, 'PATCH');
+    }
+    // URL для «Открыть в браузере»: прокси-роут деплоера на первую публикацию сервиса.
+    // Работает и локально, и на сервере (тот же хост панели), без зависимости от DNS.
+    function serviceOpenUrl(service) {
+        const app = (service.applications || [])[0];
+        return app ? `${window.location.origin}/api/proxy/${encodeURIComponent(app.name)}/` : null;
+    }
+    function wireServiceOpenButton(btn, service) {
+        if (!btn) return;
+        const url = serviceOpenUrl(service);
+        if (url) {
+            btn.disabled = false;
+            btn.title = 'Открыть сервис через прокси деплоера';
+            btn.onclick = () => window.open(url, '_blank', 'noopener');
+        } else {
+            btn.disabled = false;
+            btn.title = 'Сервис не опубликован';
+            btn.onclick = () => alert('Сервис ещё не опубликован. Нажмите «Опубликовать» (домен/публичная точка входа), затем откройте.');
+        }
+    }
+
+    // Детали сервиса показываются в едином drawer (как на дашборде) — openDetailDrawer('svc', id).
+    // Прежняя встроенная панель удалена; живое обновление drawer — в pollServiceDrawer.
+
+    // --- Live-обновление UI (поллинг): статусы/индикаторы и логи без переклика. ---
+    // Один постоянный таймер; на каждом тике сам решает по текущей странице, что
+    // обновлять. Не мешает модалкам/дропдаунам/скрытой вкладке.
+    let pollTimer = null, lastServicesSig = '';
+    const POLL_MS = 4000;
+    const startPolling = () => { stopPolling(); pollTimer = setInterval(pollTick, POLL_MS); };
+    const stopPolling = () => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; };
+    async function pollTick() {
+        if (document.hidden || !getToken()) return;
+        if (document.querySelector('.modal-backdrop.show')) return;  // не дёргаем во время модалок
+        const page = window.location.hash.replace('#', '') || 'services';
+        const onServices = currentStage === 'services' && document.getElementById('servicesContainer');
+        const onDashboard = page === 'dashboard';
+        if (!onServices && !onDashboard) return;
+        try {
+            invalidateCache('services');
+            const services = await fetchData('services', '/api/services');
+            const sig = services.map(s => `${s.id}:${s.status}:${s.assigned_port}:${(s.applications || []).length}`).sort().join('|');
+            const changed = sig !== lastServicesSig;
+            lastServicesSig = sig;
+            const drawerOpen = document.getElementById('detailDrawer').classList.contains('show');
+            if (onServices) {
+                // Список перерисовываем при изменении, когда не открыт дропдаун и не открыт drawer
+                // (он поверх списка — лишний ре-рендер не нужен).
+                if (changed && !document.querySelector('.dropdown-menu.show') && !drawerOpen) loadAndDisplayServices();
+                pollServiceDrawer(services);  // живые логи/статы открытого drawer сервиса
+            } else if (onDashboard) {
+                // Drawer открыт → живёт-обновляем его (а дашборд под ним не трогаем, чтобы не сбить zoom).
+                if (drawerOpen) pollServiceDrawer(services);
+                else if (changed) { invalidateCache('systemMetrics'); renderDashboard(); }
+            }
+        } catch (_) { /* тихо: следующий тик повторит */ }
+    }
+    // prep может быть как async (возвращает Promise), так и СИНХРОННЫМ (prepareConfigModal
+    // возвращает undefined). Раньше безусловный prep().catch() падал на undefined.catch
+    // → модалка «Настройки сборки» вообще не открывалась. Теперь терпимо к обоим случаям.
+    const showModal = (id, prep) => {
+        if (prep) {
+            try {
+                const r = prep();
+                if (r && typeof r.then === 'function') r.catch(err => console.error(`Modal prep failed for ${id}`, err));
+            } catch (err) { console.error(`Modal prep failed for ${id}`, err); }
+        }
+        document.getElementById(id).classList.add('show');
+    };
     const hideModal = id => document.getElementById(id).classList.remove('show');
 
     // --- Глобальные Обработчики и Запуск ---
-    document.addEventListener('click', e => { if (e.target.closest('[data-close-modal]')) hideModal(e.target.closest('.modal-backdrop').id); if (!e.target.closest('.dropdown')) { document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show')); } });
+    // Пресет-чипы расширенной сборки: заполняют базовый образ / команду / порт в форме.
+    // data-image/cmd/port пусты для «Python (FastAPI)» → возврат к автогену по умолчанию.
+    function applyBuildPreset(chip) {
+        const form = chip.closest('form');
+        const presets = chip.closest('.build-presets');
+        if (!form) return;
+        if (form.elements.base_image) form.elements.base_image.value = chip.dataset.image || '';
+        if (form.elements.run_command) form.elements.run_command.value = chip.dataset.cmd || '';
+        if (form.elements.internal_port) form.elements.internal_port.value = chip.dataset.port || '';
+        if (presets) presets.querySelectorAll('.preset-chip').forEach(c => c.classList.toggle('active', c === chip));
+    }
+
+    document.addEventListener('click', e => {
+        const presetChip = e.target.closest('.preset-chip[data-preset]');
+        if (presetChip) { applyBuildPreset(presetChip); return; }
+        // Раскрытие расширенной сборки ВБОК: модалка становится шире (второй столбец),
+        // а не растёт вниз со скроллом (по фидбэку). Класс на .modal управляет шириной/гридом.
+        const advToggle = e.target.closest('[data-toggle-advanced]');
+        if (advToggle) {
+            const modal = advToggle.closest('.modal');
+            const open = modal.classList.toggle('has-advanced');
+            advToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            return;
+        }
+        if (e.target.closest('[data-close-modal]')) hideModal(e.target.closest('.modal-backdrop').id);
+        if (e.target.closest('[data-close-drawer]') || e.target.id === 'detailDrawer') closeDrawer();
+        if (!e.target.closest('.dropdown')) { document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show')); }
+        // Закрыть открытую историю версий (overlay) по клику вне неё.
+        if (!e.target.closest('.lib-history')) {
+            document.querySelectorAll('.lib-versions-rest:not([hidden])').forEach(list => {
+                list.setAttribute('hidden', '');
+                const t = list.previousElementSibling;
+                if (t) { t.classList.remove('open'); const tx = t.querySelector('.lvt-text'); if (tx) tx.textContent = `Ещё версий: ${list.children.length}`; }
+            });
+        }
+        const tab = e.target.closest('.tab');
+        if (tab && tab.closest('.tab-bar')) {
+            const bar = tab.closest('.tab-bar');
+            const name = tab.dataset.tab;
+            bar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+            bar.parentElement.querySelectorAll(':scope > .tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
+        }
+    });
     document.querySelectorAll('.nav-item').forEach(link => link.onclick = e => { if (e.currentTarget.id === 'logoutBtn') return; e.preventDefault(); const page = e.currentTarget.dataset.page; if (window.location.hash !== `#${page}`) window.location.hash = page; });
     window.addEventListener('hashchange', () => navigate(window.location.hash.substring(1) || 'services'));
 

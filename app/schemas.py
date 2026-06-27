@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
+from app.validators import DomainStr, OptionalDomainStr, OptionalCertName
+
 
 # --- НОВЫЕ СХЕМЫ ДЛЯ ПОЛЬЗОВАТЕЛЯ ПАНЕЛИ ---
 class UserBase(BaseModel):
@@ -40,6 +42,7 @@ class AppGroup(AppGroupBase):
 # --- УРОВЕНЬ 1: Схемы для кода ---
 class ArtifactBase(BaseModel):
     version_tag: str
+    description: Optional[str] = None
     zip_hash: str
     stored_zip_path: str
 
@@ -56,6 +59,31 @@ class Artifact(ArtifactBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class GithubImportRequest(BaseModel):
+    """Импорт версии из GitHub-репозитория (публичного, либо приватного — если
+    подключён GitHub-аккаунт, см. GithubConnectionIn)."""
+    repo_url: str
+    ref: Optional[str] = None          # ветка/тег/SHA (опц.; иначе main→master)
+    version_tag: Optional[str] = None  # опц.; иначе из VERSION/авто-бамп
+    description: Optional[str] = None  # опц.; иначе из CHANGELOG
+
+
+class GithubConnectionIn(BaseModel):
+    """Подключение GitHub-аккаунта (PAT) — ADR-033."""
+    token: str
+
+
+class GithubConnectionStatus(BaseModel):
+    connected: bool
+    login: Optional[str] = None
+    masked_token: Optional[str] = None
+
+
+class GithubRepo(BaseModel):
+    full_name: str
+    private: bool
+
+
 class AppBlueprintBase(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9-]+$")
     description: Optional[str] = None
@@ -63,6 +91,11 @@ class AppBlueprintBase(BaseModel):
 
 class AppBlueprintCreate(AppBlueprintBase):
     pass
+
+
+class AppBlueprintUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, pattern=r"^[a-z0-9-]+$")
+    description: Optional[str] = None
 
 
 class AppBlueprint(AppBlueprintBase):
@@ -93,6 +126,7 @@ class DeploymentBase(BaseModel):
 
 class DeploymentCreate(DeploymentBase):
     artifact_id: int
+    name: Optional[str] = None
 
 class Deployment(DeploymentBase):
     id: int
@@ -120,12 +154,17 @@ class AppUser(AppUserBase):
 
 class ApplicationBase(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9-]+$")
-    domain: str
+    domain: DomainStr  # валидируется (защита от инъекции в nginx-конфиг)
 
 class ApplicationCreate(ApplicationBase):
     deployment_id: Optional[int] = None
     service_id: Optional[int] = None  # Добавлено для совместимости
-    ssl_cert_name: Optional[str] = None
+    ssl_cert_name: OptionalCertName = None
+
+
+class ApplicationUpdate(BaseModel):
+    domain: OptionalDomainStr = None
+    ssl_cert_name: OptionalCertName = None
 
 class Application(ApplicationBase):
     id: int
@@ -137,4 +176,4 @@ class Application(ApplicationBase):
     model_config = ConfigDict(from_attributes=True)
 
 class IssueSSLRequest(BaseModel):
-    domain: str
+    domain: DomainStr  # валидируется (домен уходит аргументом в certbot)

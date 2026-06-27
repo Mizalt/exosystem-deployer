@@ -96,6 +96,70 @@ def test_proxy_no_online_instances_503(proxy_env):
     assert r.status_code == 503
 
 
+def test_round_robin_rotates_across_replicas():
+    """Идея 5 фаза 1: трафик распределяется по ВСЕМ online-репликам по кругу,
+    а не уходит всегда в первую (online_instances[0])."""
+    from app.routers import proxy
+
+    class _Inst:
+        def __init__(self, id, name):
+            self.id = id
+            self.container_name = name
+
+    # Передаём неотсортированными — хелпер сортирует по id (стабильный порядок ротации).
+    insts = [_Inst(2, "b"), _Inst(1, "a"), _Inst(3, "c")]
+    proxy._rr_counters.pop(777, None)
+    picks = [proxy._pick_round_robin(777, insts).container_name for _ in range(6)]
+    assert picks == ["a", "b", "c", "a", "b", "c"]
+
+
+def test_round_robin_single_replica_is_stable():
+    from app.routers import proxy
+
+    class _Inst:
+        def __init__(self, id, name):
+            self.id = id
+            self.container_name = name
+
+    insts = [_Inst(5, "only")]
+    proxy._rr_counters.pop(778, None)
+    assert [proxy._pick_round_robin(778, insts).container_name for _ in range(3)] == ["only", "only", "only"]
+
+
+def test_proxy_success_streams_response(proxy_env, monkeypatch):
+    """Success-путь: ответ апстрима стримится через StreamingResponse (а не падает на
+    Response(content=<async gen>)). Hop-by-hop заголовки (transfer-encoding) убираются."""
+    Session, client = proxy_env
+    _seed_app(Session, online=True)
+
+    from app.routers import proxy
+
+    class FakeResp:
+        status_code = 200
+        headers = httpx.Headers({"content-type": "text/plain", "transfer-encoding": "chunked", "x-test": "1"})
+
+        async def aiter_raw(self):
+            yield b"hello "
+            yield b"world"
+
+        async def aclose(self):
+            pass
+
+    class FakeHttp:
+        def build_request(self, **kwargs):
+            return object()
+
+        async def send(self, request, stream=False):
+            return FakeResp()
+
+    monkeypatch.setattr(proxy, "http_client", FakeHttp())
+    r = client.get("/api/proxy/app/")
+    assert r.status_code == 200
+    assert r.content == b"hello world"
+    assert r.headers.get("x-test") == "1"
+    assert "transfer-encoding" not in {k.lower() for k in r.headers}  # hop-by-hop снят
+
+
 def test_proxy_connect_error_502(proxy_env, monkeypatch):
     Session, client = proxy_env
     _seed_app(Session, online=True)

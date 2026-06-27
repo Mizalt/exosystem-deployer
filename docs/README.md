@@ -38,6 +38,7 @@ DevOps / аренды managed-платформы — один дешёвый VPS
 ## Текущий статус одной строкой
 
 **MVP в работе.** Ядро стабилизировано, стек полностью контейнеризован
-(`docker compose up -d --build`), есть one-command install (`install.sh`/`install.ps1`)
+(`docker compose up -d --build`), one-command install (`install.sh`/`install.ps1`)
 с авто-онбордингом админа, тесты (pytest). Сетевая модель — общая `deployer-net`.
-Установка и первый деплой — [`07_DEPLOY.md`](07_DEPLOY.md).
+**Установка одной командой проверена на чистом Debian 11** (панель по HTTPS с
+Let's Encrypt). Установка и первый деплой — [`07_DEPLOY.md`](07_DEPLOY.md).

@@ -1,13 +1,46 @@
 # --- app/routers/proxy.py ---
 
+import threading
+
 import httpx
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
-from app import crud
+from app import crud, run_config
 from app.database import get_db
+
+# Hop-by-hop заголовки (RFC 2616 §13.5.1) — не проксируем: их смысл только для одного
+# соединения. transfer-encoding убираем особенно: httpx уже снял chunked-framing, а
+# StreamingResponse сам решит, как отдавать тело (иначе двойное кодирование). А вот
+# content-length и content-encoding СОХРАНЯЕМ — aiter_raw() отдаёт «сырое» тело как с
+# провода (всё ещё gzip'нутое, нужной длины), они должны дойти до клиента.
+_HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+               "te", "trailers", "transfer-encoding", "upgrade"}
 
 router = APIRouter()
 http_client = httpx.AsyncClient(timeout=60.0)
+
+# Round-robin балансировка по online-репликам. Состояние — счётчик в процессе
+# деплоера (единственный uvicorn-процесс). Гонки безвредны: максимум — лёгкий
+# перекос распределения, не ошибка. Балансируются только stateless-сервисы
+# (stateful/replicas=1 — отдельный режим, см. ADR-018, Идея 5).
+_rr_counters: dict[int, int] = {}
+_rr_lock = threading.Lock()
+
+
+def _pick_round_robin(deployment_id: int, instances: list):
+    """Выбирает следующую online-реплику по кругу (round-robin).
+
+    Реплики сортируются по id для стабильного порядка ротации. Раньше прокси брал
+    всегда первую (online_instances[0]) — 2-я и далее реплики не получали трафик
+    (известное ограничение, закрывается здесь — Идея 5 фаза 1).
+    """
+    ordered = sorted(instances, key=lambda i: i.id)
+    with _rr_lock:
+        idx = _rr_counters.get(deployment_id, 0)
+        _rr_counters[deployment_id] = idx + 1
+    return ordered[idx % len(ordered)]
 
 @router.api_route("/api/proxy/{app_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_to_application(
@@ -50,11 +83,12 @@ async def proxy_to_application(
     if not online_instances:
         return Response(f"No online instances for application '{app_name}' are available.", status_code=503)
 
-    # 4. Проксируем запрос на первую доступную реплику.
+    # 4. Балансируем запрос по online-репликам (round-robin).
     # В сетевой модели deployer-net обращаемся к контейнеру по ИМЕНИ на внутренний
-    # порт 80 (приложение слушает 80). Host-порты больше не используются.
-    target_instance = online_instances[0]
-    target_url = f"http://{target_instance.container_name}:80/{path}"
+    # порт приложения (по умолчанию 80, настраивается в расширенном режиме — Идея 2а).
+    target_instance = _pick_round_robin(deployment.id, online_instances)
+    target_port = run_config.effective_port(deployment.internal_port)
+    target_url = f"http://{target_instance.container_name}:{target_port}/{path}"
 
     headers = dict(request.headers)
     headers["X-Real-IP"] = request.client.host
@@ -67,10 +101,15 @@ async def proxy_to_application(
             params=request.query_params, content=await request.body()
         )
         proxied_resp = await http_client.send(proxied_req, stream=True)
-        return Response(
-            content=proxied_resp.aiter_raw(),
+        # ВАЖНО: стримим через StreamingResponse, а не Response(content=<async gen>) —
+        # базовый Response пытается .encode() контент и падает на async-генераторе.
+        # aclose() в background закрывает upstream-соединение после отдачи тела.
+        resp_headers = {k: v for k, v in proxied_resp.headers.items() if k.lower() not in _HOP_BY_HOP}
+        return StreamingResponse(
+            proxied_resp.aiter_raw(),
             status_code=proxied_resp.status_code,
-            headers=proxied_resp.headers
+            headers=resp_headers,
+            background=BackgroundTask(proxied_resp.aclose),
         )
     except httpx.ConnectError:
         return Response(f"Could not connect to service container '{target_instance.container_name}'.", status_code=502)

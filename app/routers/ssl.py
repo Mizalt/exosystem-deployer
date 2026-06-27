@@ -24,7 +24,9 @@ from app import security, models
 CurrentUser = Annotated[models.User, Depends(security.get_current_user)]
 
 router = APIRouter(prefix="/api/ssl", tags=["ssl"])
-http_client = httpx.AsyncClient(verify=False)
+# verify=True: обращаемся к внешнему HTTPS-API (api.ipify.org) — проверку TLS не
+# отключаем (раньше было verify=False без причины).
+http_client = httpx.AsyncClient()
 
 class SSLCertificateInfo(BaseModel): name: str; subject: str; not_after: datetime
 class DnsCheckResponse(BaseModel): domain: str; server_ip: str | None; domain_ip: str | None; matches: bool; error: str | None

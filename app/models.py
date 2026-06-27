@@ -30,6 +30,7 @@ class Artifact(Base):
     __tablename__ = "artifacts"
     id = Column(Integer, primary_key=True, index=True)
     version_tag = Column(String, index=True, nullable=False)
+    description = Column(Text, nullable=True)  # заметки к версии (changelog), опц.
     zip_hash = Column(String, nullable=False)
     stored_zip_path = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -48,10 +49,22 @@ class Deployment(Base):
     """Желаемое состояние: Приложение + Версия (Артефакт) + Количество реплик."""
     __tablename__ = "deployments"
     id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=True)  # человекочитаемое имя сервиса (опц., автоген из blueprint)
     blueprint_id = Column(Integer, ForeignKey("app_blueprints.id"), nullable=False)
     artifact_id = Column(Integer, ForeignKey("artifacts.id"), nullable=False)
     target_replicas = Column(Integer, default=1, nullable=False)  # Сколько реплик мы ХОТИМ
     group_name = Column(String, nullable=False)  # Для пула портов
+    last_build_log = Column(Text, nullable=True)  # лог последней неудачной сборки (для UI-диагностики)
+    build_attempts = Column(Integer, default=0, nullable=False)  # подряд неудачных сборок (backoff, анти-флуд)
+
+    # --- Расширенный режим сборки/рантайма (Идея 2а, ADR-021) ---
+    # Убирают хардкод «питон-only + порт 80 + нет env». Все опциональны: пусто →
+    # питоновский автоген на порту 80 (прежнее поведение). nullable=True, т.к.
+    # авто-миграция ADD COLUMN не ставит DEFAULT старым строкам (код коалесит None).
+    internal_port = Column(Integer, default=80, nullable=True)  # порт приложения внутри контейнера; 0 = worker без порта
+    run_command = Column(Text, nullable=True)      # команда запуска (напр. 'python bot.py', 'node index.js')
+    base_image = Column(String, nullable=True)     # базовый образ сборки (напр. 'node:20-alpine')
+    env_vars = Column(Text, nullable=True)         # env-переменные рантайма (JSON-объект строк)
 
     blueprint = relationship("AppBlueprint", back_populates="deployments")
     artifact = relationship("Artifact", back_populates="deployments")
@@ -69,6 +82,8 @@ class Instance(Base):
     assigned_port = Column(Integer, unique=True, nullable=False)
     status = Column(String, default="starting")  # starting, online, restarting, failed, offline
     restart_count = Column(Integer, default=0, nullable=False)  # для CrashLoopBackOff
+    exit_code = Column(Integer, nullable=True)  # код выхода контейнера при отказе (диагностика)
+    last_logs = Column(Text, nullable=True)  # снимок логов на момент отказа (переживает удаление контейнера)
     deployed_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     deployment = relationship("Deployment", back_populates="instances")
@@ -104,3 +119,13 @@ class AppUser(Base):
     hashed_password = Column(String, nullable=False)
     application_id = Column(Integer, ForeignKey("applications.id"), nullable=False)
     application = relationship("Application", back_populates="users")
+
+
+class GithubConnection(Base):
+    """Подключённый GitHub-аккаунт деплоера (ADR-033). Единственная строка (id=1)."""
+    __tablename__ = "github_connections"
+    id = Column(Integer, primary_key=True, index=True)
+    # Шифротекст SecretBox.seal(PAT) — НИКОГДА plaintext (app/secret_box.py).
+    token_secret = Column(Text, nullable=False)
+    login = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
