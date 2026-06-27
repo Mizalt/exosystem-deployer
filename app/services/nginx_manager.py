@@ -32,7 +32,16 @@ CATCHALL_CONFIG_TEMPLATE = """server {
     ssl_certificate /etc/letsencrypt/default/default.crt;
     ssl_certificate_key /etc/letsencrypt/default/default.key;
 
-    return 403;
+    # ACME HTTP-01: ВСЕГДА отдаём challenge из webroot, даже если для домена ещё
+    # нет своего server-блока (или он не успел перезагрузиться). Иначе выпуск SSL
+    # ловит 403 от этого catchall — частый footgun панельного/приложенческого SSL.
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme_challenge;
+    }
+
+    location / {
+        return 403;
+    }
 }
 """
 
@@ -154,12 +163,15 @@ server {{
 def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):
     """Генерирует конфиг для самой панели управления и catchall-ловушку."""
 
-    # 0. Генерируем catchall-ловушку
+    # 0. Генерируем/обновляем catchall-ловушку. Пишем ВСЕГДА (не только если нет
+    #    файла), чтобы улучшения шаблона (напр. ACME-локация) применялись на
+    #    существующих установках при следующем сохранении настроек панели.
     catchall_path = config.NGINX_SITES_DIR / "00-catchall.conf"
-    if not catchall_path.exists():
-        _ensure_default_ssl_files()
+    _ensure_default_ssl_files()
+    current_catchall = catchall_path.read_text(encoding="utf-8") if catchall_path.exists() else None
+    if current_catchall != CATCHALL_CONFIG_TEMPLATE:
         catchall_path.write_text(CATCHALL_CONFIG_TEMPLATE, encoding="utf-8")
-        print("INFO: Catchall config generated.")
+        print("INFO: Catchall config written/updated.")
 
     panel_config_path = config.NGINX_SITES_DIR / "10-panel.conf"
     initial_config_path = config.NGINX_SITES_DIR / "99-initial-access.conf"  # Временный конфиг для IP
