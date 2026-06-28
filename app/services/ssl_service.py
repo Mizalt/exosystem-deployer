@@ -1,6 +1,7 @@
 # --- ИЗМЕНЕННЫЙ ФАЙЛ: app/services/ssl_service.py ---
 
 import asyncio
+import os
 import secrets
 from app import config
 from app import environment
@@ -26,8 +27,11 @@ def acme_preflight(domain: str) -> tuple[bool, str]:
     probe_dir = config.ACME_CHALLENGE_DIR / ".well-known" / "acme-challenge"
     probe_file = probe_dir / token
     try:
+        # Webroot + подкаталоги должны быть проходимы nginx-воркером (umask-077 footgun).
+        nginx_manager.ensure_acme_webroot_traversable()
         probe_dir.mkdir(parents=True, exist_ok=True)
         probe_file.write_text(token, encoding="utf-8")
+        os.chmod(probe_file, 0o644)  # nginx-воркер (uid != root) должен прочитать файл
         url = f"http://127.0.0.1/.well-known/acme-challenge/{token}"
         # busybox wget есть в nginx:alpine; --header задаёт виртуальный хост.
         code, out = docker_manager.exec_in_container(
