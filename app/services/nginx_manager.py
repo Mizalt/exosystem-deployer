@@ -79,6 +79,36 @@ def _ensure_default_ssl_files():
         raise
 
 
+def _write_catchall_if_changed() -> bool:
+    """Идемпотентно (пере)записывает 00-catchall.conf актуальным шаблоном.
+
+    Шаблон включает ACME-локацию (ADR-044). Возвращает True, если файл реально
+    изменился (значит нужен reload). Не трогает panel/app-конфиги.
+    """
+    catchall_path = config.NGINX_SITES_DIR / "00-catchall.conf"
+    _ensure_default_ssl_files()
+    current = catchall_path.read_text(encoding="utf-8") if catchall_path.exists() else None
+    if current != CATCHALL_CONFIG_TEMPLATE:
+        catchall_path.write_text(CATCHALL_CONFIG_TEMPLATE, encoding="utf-8")
+        print("INFO: Catchall config written/updated.")
+        return True
+    return False
+
+
+def ensure_acme_challenge_ready() -> None:
+    """Гарантирует, что nginx отдаёт ACME HTTP-01 challenge для ЛЮБОГО домена.
+
+    Вызывается ПЕРЕД выпуском SSL (ssl_service): самоизлечивает устаревший/
+    отсутствующий catchall — частую причину 403 на `/.well-known/acme-challenge/`
+    при выпуске для домена, у которого ещё нет собственного актуального
+    server-блока (или нода поднята из среза ДО ADR-044). В отличие от
+    `update_panel_nginx_config`, НЕ удаляет/не переписывает panel- и app-конфиги,
+    поэтому безопасно дёргать в любой момент. Reload — только если catchall изменился.
+    """
+    if _write_catchall_if_changed():
+        reload_nginx()
+
+
 def _get_proxy_headers(proxy_path: str) -> str:
     """Генерирует блок проксирования на деплоер.
 
@@ -166,12 +196,8 @@ def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):
     # 0. Генерируем/обновляем catchall-ловушку. Пишем ВСЕГДА (не только если нет
     #    файла), чтобы улучшения шаблона (напр. ACME-локация) применялись на
     #    существующих установках при следующем сохранении настроек панели.
-    catchall_path = config.NGINX_SITES_DIR / "00-catchall.conf"
-    _ensure_default_ssl_files()
-    current_catchall = catchall_path.read_text(encoding="utf-8") if catchall_path.exists() else None
-    if current_catchall != CATCHALL_CONFIG_TEMPLATE:
-        catchall_path.write_text(CATCHALL_CONFIG_TEMPLATE, encoding="utf-8")
-        print("INFO: Catchall config written/updated.")
+    #    Reload здесь не делаем — его выполнит caller (общий для catchall и panel).
+    _write_catchall_if_changed()
 
     panel_config_path = config.NGINX_SITES_DIR / "10-panel.conf"
     initial_config_path = config.NGINX_SITES_DIR / "99-initial-access.conf"  # Временный конфиг для IP

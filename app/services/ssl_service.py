@@ -1,10 +1,49 @@
 # --- ИЗМЕНЕННЫЙ ФАЙЛ: app/services/ssl_service.py ---
 
 import asyncio
+import secrets
 from app import config
 from app import environment
 from app.services import docker_manager
+from app.services import nginx_manager
 from app.services.ws_manager import manager
+
+
+def acme_preflight(domain: str) -> tuple[bool, str]:
+    """Пред-проверка достижимости ACME HTTP-01 challenge ДО запуска certbot.
+
+    Пишет одноразовый проб-файл в webroot и запрашивает его изнутри nginx-
+    контейнера с заголовком `Host: <domain>` — ровно то, что сделает Let's Encrypt,
+    но НЕ тратя лимит LE и не требуя внешнего DNS. Ловит главный footgun — 403 от
+    catchall (nginx не отдаёт challenge) и 404 (рассинхрон webroot) с понятным
+    выводом. Никогда не бросает исключение: возвращает (ok, detail).
+
+    Граница: проверка ВНУТРЕННЯЯ (через nginx), поэтому валидирует конфиг nginx, но
+    НЕ внешний DNS/файрвол. Если она прошла, а certbot всё равно упал — причина
+    снаружи (DNS ещё не указывает на этот IP либо закрыт 80-й порт).
+    """
+    token = "deployer-preflight-" + secrets.token_hex(12)
+    probe_dir = config.ACME_CHALLENGE_DIR / ".well-known" / "acme-challenge"
+    probe_file = probe_dir / token
+    try:
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text(token, encoding="utf-8")
+        url = f"http://127.0.0.1/.well-known/acme-challenge/{token}"
+        # busybox wget есть в nginx:alpine; --header задаёт виртуальный хост.
+        code, out = docker_manager.exec_in_container(
+            config.NGINX_CONTAINER_NAME,
+            ["wget", "-q", "-O", "-", "--header", f"Host: {domain}", url],
+        )
+        if code == 0 and token in out:
+            return True, "nginx отдаёт challenge (внутренняя проверка пройдена)"
+        return False, f"nginx не отдал challenge (код {code}): {out.strip()[:200] or 'пустой ответ (вероятно 403/404)'}"
+    except Exception as e:  # noqa: BLE001 — диагностика не должна ронять выпуск
+        return False, f"проверка не выполнена ({e!r}) — продолжаю выпуск"
+    finally:
+        try:
+            probe_file.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def run_command_sync_streamed(container_name: str, cmd: list[str], task_id: str,
@@ -47,9 +86,29 @@ async def perform_ssl_issuance(task_id: str, domain: str, is_renew: bool = False
     # --- ИЗМЕНЕНИЕ: Получаем event loop ЗДЕСЬ, в основном потоке ---
     loop = asyncio.get_running_loop()
 
+    preflight_ok = False
     try:
         action_word = "Обновление" if is_renew else "Выпуск"
         await manager.send_message(f"=== Начало процесса: {action_word} SSL для домена: {domain} ===", task_id)
+
+        # [0/2] Самоизлечение: гарантируем, что nginx отдаёт ACME-challenge для
+        # ЛЮБОГО домена (устаревший/битый catchall — частая причина 403). Делаем
+        # ДО certbot. panel/app-конфиги не трогаются.
+        await manager.send_message("\n[0/2] Подготовка ACME-челленджа (обновляю catchall, перезагружаю Nginx)...", task_id)
+        try:
+            await loop.run_in_executor(None, nginx_manager.ensure_acme_challenge_ready)
+        except Exception as e:
+            await manager.send_message(f" -> ПРЕДУПРЕЖДЕНИЕ: не удалось обновить catchall: {repr(e)}", task_id)
+
+        # Пред-проверка пути challenge изнутри (ловит 403/404 ДО траты попытки LE).
+        preflight_ok, detail = await loop.run_in_executor(None, acme_preflight, domain)
+        if preflight_ok:
+            await manager.send_message(f" -> Пред-проверка ACME: OK — {detail}", task_id)
+        else:
+            await manager.send_message(
+                f" -> Пред-проверка ACME: ВНИМАНИЕ — {detail}\n"
+                f"    (nginx не отдаёт challenge локально; certbot, скорее всего, тоже получит 403/404)",
+                task_id)
 
         # Пути внутри контейнеров и контактный email берём из слоя абстракции
         # окружения (email — из env DEPLOYER_ACME_EMAIL, без хардкода домена).
@@ -98,6 +157,19 @@ async def perform_ssl_issuance(task_id: str, domain: str, is_renew: bool = False
     except Exception as e:
         error_message = f"\n--- !!! КРИТИЧЕСКАЯ ОШИБКА: {repr(e)} ---"
         await manager.send_message(error_message, task_id)
+        # Дизамбигуация для пользователя: внутренняя проверка отделяет «битый nginx»
+        # от «не настроен DNS снаружи».
+        if preflight_ok:
+            await manager.send_message(
+                "ПОДСКАЗКА: nginx локально отдаёт ACME-challenge (пред-проверка прошла), "
+                "значит проблема СНАРУЖИ: A-запись домена ещё не указывает на этот сервер, "
+                "DNS не распространился, либо закрыт 80-й порт. Проверь A-запись и повтори "
+                "через несколько минут.", task_id)
+        else:
+            await manager.send_message(
+                "ПОДСКАЗКА: nginx локально НЕ отдал ACME-challenge — проблема в конфигурации "
+                "(битый/устаревший nginx-конфиг). Открой «Настройки → Панель», сохрани домен "
+                "заново (это перегенерирует конфиг) и повтори выпуск.", task_id)
 
     finally:
         await asyncio.sleep(2)
