@@ -29,7 +29,24 @@ router = APIRouter(prefix="/api/ssl", tags=["ssl"])
 http_client = httpx.AsyncClient()
 
 class SSLCertificateInfo(BaseModel): name: str; subject: str; not_after: datetime
-class DnsCheckResponse(BaseModel): domain: str; server_ip: str | None; domain_ip: str | None; matches: bool; error: str | None
+class DnsCheckResponse(BaseModel): domain: str; server_ip: str | None; domain_ip: str | None; domain_ips: list[str] = []; matches: bool; warning: str | None = None; error: str | None
+
+
+def evaluate_dns_match(server_ip: str | None, domain_ips: list[str]) -> tuple[bool, str | None]:
+    """Чистая логика DNS-чека (тестируется без сети).
+
+    Сервер указан, если его IP ЕСТЬ среди A-записей домена — детерминированно, не зависит
+    от порядка резолвера (иначе при нескольких записях чек «мигает»). Если кроме нужной есть
+    лишние записи — предупреждаем: они ломают выпуск SSL (LE может проверить не тот сервер).
+    """
+    matches = bool(server_ip) and server_ip in domain_ips
+    warning = None
+    if matches and len(domain_ips) > 1:
+        stale = [ip for ip in domain_ips if ip != server_ip]
+        warning = ("Домен указывает сюда, но есть лишние A-записи: " + ", ".join(stale)
+                   + ". Удали их (оставь только " + server_ip
+                   + ") — иначе Let's Encrypt может проверить не тот сервер и выпуск SSL упадёт.")
+    return matches, warning
 
 # --- ЗАЩИЩАЕМ ЭНДПОИНТЫ ---
 @router.post("/issue")
@@ -54,15 +71,22 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 async def check_domain_dns(current_user: CurrentUser, domain: str = Query(...)):
     if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
         raise HTTPException(status_code=400, detail="Некорректный формат домена.")
-    server_ip=None; domain_ip=None; matches=False; error_message=None
+    server_ip=None; domain_ip=None; domain_ips=[]; matches=False; warning=None; error_message=None
     try:
         response = await http_client.get("https://api.ipify.org"); response.raise_for_status(); server_ip = response.text.strip()
-        loop = asyncio.get_running_loop(); addr_info = await loop.getaddrinfo(domain, None, family=socket.AF_INET); domain_ip = addr_info[0][4][0]
-        matches = (server_ip == domain_ip)
+        loop = asyncio.get_running_loop()
+        # ВАЖНО: собираем ВСЕ A-записи (не addr_info[0]) — иначе при нескольких записях
+        # резолвер отдаёт случайную и чек «мигает» ✅/❌. Совпадение детерминировано:
+        # сервер указан, если его IP ЕСТЬ среди A-записей.
+        addr_info = await loop.getaddrinfo(domain, None, family=socket.AF_INET)
+        domain_ips = sorted({info[4][0] for info in addr_info})
+        domain_ip = ", ".join(domain_ips) if domain_ips else None
+        matches, warning = evaluate_dns_match(server_ip, domain_ips)
     except httpx.RequestError as e: error_message = f"Не удалось получить публичный IP сервера. Ошибка сети: {e}"
     except socket.gaierror: error_message = f"Не удалось найти A-запись для домена '{domain}'."
     except Exception as e: error_message = f"Произошла ошибка при проверке DNS: {str(e)}"
-    return {"domain": domain, "server_ip": server_ip, "domain_ip": domain_ip, "matches": matches, "error": error_message}
+    return {"domain": domain, "server_ip": server_ip, "domain_ip": domain_ip, "domain_ips": domain_ips,
+            "matches": matches, "warning": warning, "error": error_message}
 
 @router.get("/certificates", response_model=List[SSLCertificateInfo])
 async def list_ssl_certificates(current_user: CurrentUser):

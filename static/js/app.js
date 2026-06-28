@@ -945,7 +945,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     dnsStatus.innerHTML = `<span style="color:var(--danger)">A-запись не указывает на сервер (сервер: ${dns.server_ip || 'N/A'}, домен: ${dns.domain_ip || 'N/A'}). Выпуск невозможен.</span>`;
                     btn.disabled = false; return;
                 }
-                dnsStatus.innerHTML = `<span style="color:var(--success)">DNS OK. Готовлю домен и выпускаю сертификат...</span>`;
+                dnsStatus.innerHTML = dns.warning
+                    ? `<span style="color:var(--warning,#e0a000)">⚠️ ${escapeHTML(dns.warning)} Пробую выпустить…</span>`
+                    : `<span style="color:var(--success)">DNS OK. Готовлю домен и выпускаю сертификат...</span>`;
                 // 1) Домен по HTTP — чтобы webroot-челлендж резолвился на этом домене.
                 await postJSON(null, '/api/panel/settings', { domain, ssl_cert_name: null }, null, null);
                 // 2) Выпуск Let's Encrypt (живой лог).
@@ -1407,7 +1409,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     btn.disabled = false;
                     return;
                 }
-                dnsStatus.innerHTML = `<span style="color:var(--success)">DNS OK. Выпускаем сертификат...</span>`;
+                dnsStatus.innerHTML = dns.warning
+                    ? `<span style="color:var(--warning,#e0a000)">⚠️ ${escapeHTML(dns.warning)} Пробую выпустить…</span>`
+                    : `<span style="color:var(--success)">DNS OK. Выпускаем сертификат...</span>`;
                 await issueSslForDomain(domain, logWindow);
                 data.ssl_cert_name = domain;
             } catch (err) {
@@ -1441,7 +1445,8 @@ document.addEventListener('DOMContentLoaded', () => {
             timer = setTimeout(async () => {
                 try {
                     const d = await checkDns(domain);
-                    if (d.matches) { status.className = 'dns-inline good'; status.textContent = `✅ Домен указывает на этот сервер (${d.server_ip || ''})`; }
+                    if (d.matches && d.warning) { status.className = 'dns-inline warn'; status.textContent = `⚠️ Указывает сюда (${d.server_ip || ''}), но есть лишние A-записи: ${(d.domain_ips||[]).filter(ip=>ip!==d.server_ip).join(', ')} — удали их, иначе SSL не выпустится`; }
+                    else if (d.matches) { status.className = 'dns-inline good'; status.textContent = `✅ Домен указывает на этот сервер (${d.server_ip || ''})`; }
                     else { status.className = 'dns-inline bad'; status.textContent = `❌ Не указывает на сервер · домен: ${d.domain_ip || 'нет A-записи'} · сервер: ${d.server_ip || '?'}`; }
                 } catch (e) { status.className = 'dns-inline'; status.textContent = ''; }
             }, 600);
