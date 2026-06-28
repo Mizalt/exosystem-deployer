@@ -95,16 +95,43 @@ def _write_catchall_if_changed() -> bool:
     return False
 
 
+def ensure_acme_webroot_traversable() -> None:
+    """ACME-webroot должен быть ПРОХОДИМ nginx-воркером (он работает не под root).
+
+    Footgun: если каталог webroot создан с `umask 077` (напр. cloud-init так защищал
+    `.env` и заодно зацепил `mkdir acme_challenge`), он получает режим `0700 root` →
+    nginx-воркер (uid != 0) не может в него войти → **403 на ЛЮБОЙ
+    `/.well-known/acme-challenge/`**, и certbot, и проверка падают, хотя конфиг nginx
+    корректен. Идемпотентно выставляем `0755` на webroot и его challenge-подкаталоги.
+    В каталоге только эфемерные HTTP-01 токены (их и так публично качает LE) — секретов
+    нет, world-traverse безопасен. Деплоер в контейнере root → chmod доходит до хост-тома.
+    """
+    try:
+        webroot = config.ACME_CHALLENGE_DIR
+        webroot.mkdir(parents=True, exist_ok=True)
+        os.chmod(webroot, 0o755)
+        sub = webroot / ".well-known"
+        if sub.exists():
+            os.chmod(sub, 0o755)
+            ch = sub / "acme-challenge"
+            if ch.exists():
+                os.chmod(ch, 0o755)
+    except OSError as e:
+        print(f"WARN: не удалось выставить права ACME-webroot ({config.ACME_CHALLENGE_DIR}): {e}")
+
+
 def ensure_acme_challenge_ready() -> None:
     """Гарантирует, что nginx отдаёт ACME HTTP-01 challenge для ЛЮБОГО домена.
 
-    Вызывается ПЕРЕД выпуском SSL (ssl_service): самоизлечивает устаревший/
-    отсутствующий catchall — частую причину 403 на `/.well-known/acme-challenge/`
-    при выпуске для домена, у которого ещё нет собственного актуального
-    server-блока (или нода поднята из среза ДО ADR-044). В отличие от
-    `update_panel_nginx_config`, НЕ удаляет/не переписывает panel- и app-конфиги,
-    поэтому безопасно дёргать в любой момент. Reload — только если catchall изменился.
+    Вызывается ПЕРЕД выпуском SSL (ssl_service): самоизлечивает две частые причины
+    403 на `/.well-known/acme-challenge/`:
+      1. устаревший/отсутствующий catchall (нода из среза ДО ADR-044) — перезапись шаблона;
+      2. **непроходимый webroot** (создан с umask 077 → 0700 root) — chmod 0755.
+    В отличие от `update_panel_nginx_config`, НЕ удаляет/не переписывает panel- и
+    app-конфиги, поэтому безопасно дёргать в любой момент. Reload — только если
+    catchall изменился (права webroot reload'а не требуют).
     """
+    ensure_acme_webroot_traversable()
     if _write_catchall_if_changed():
         reload_nginx()
 
@@ -197,6 +224,8 @@ def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):
     #    файла), чтобы улучшения шаблона (напр. ACME-локация) применялись на
     #    существующих установках при следующем сохранении настроек панели.
     #    Reload здесь не делаем — его выполнит caller (общий для catchall и panel).
+    #    Заодно чиним права webroot (umask-077 footgun) — ещё на старте деплоера.
+    ensure_acme_webroot_traversable()
     _write_catchall_if_changed()
 
     panel_config_path = config.NGINX_SITES_DIR / "10-panel.conf"

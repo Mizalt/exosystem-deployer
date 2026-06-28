@@ -58,6 +58,22 @@ def test_preflight_cleans_up_probe_file(monkeypatch, tmp_path):
     assert leftovers == []
 
 
+def test_preflight_makes_probe_world_readable(monkeypatch, tmp_path):
+    """Проб-файл получает 0644 — иначе nginx-воркер (uid != root) его не прочитает."""
+    monkeypatch.setattr(app_config, "ACME_CHALLENGE_DIR", tmp_path)
+    chmods = []
+    monkeypatch.setattr(ssl_service.os, "chmod", lambda p, m: chmods.append((str(p), m)))
+    monkeypatch.setattr(
+        ssl_service.docker_manager, "exec_in_container",
+        lambda c, cmd, user="": (0, _token_from_cmd(cmd)),
+    )
+
+    ok, _ = ssl_service.acme_preflight("panel.example.com")
+
+    assert ok is True
+    assert any(m == 0o644 for _, m in chmods)
+
+
 def test_preflight_never_raises_on_docker_error(monkeypatch, tmp_path):
     """Сбой docker-exec не роняет выпуск — возвращается (False, detail)."""
     monkeypatch.setattr(app_config, "ACME_CHALLENGE_DIR", tmp_path)
