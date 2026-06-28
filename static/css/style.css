@@ -246,6 +246,7 @@ header { padding: 24px 32px; display: flex; justify-content: space-between; alig
 .dns-inline.checking { color: var(--text-secondary); }
 .dns-inline.good { color: var(--success); }
 .dns-inline.bad { color: var(--danger); }
+.dns-inline.warn { color: var(--warning, #e0a000); }
 
 /* === РАСШИРЕННЫЙ РЕЖИМ СБОРКИ (Идея 2а) === */
 .advanced-hint { font-size: 13px; color: var(--text-secondary); margin: 8px 0 12px; line-height: 1.4; }
