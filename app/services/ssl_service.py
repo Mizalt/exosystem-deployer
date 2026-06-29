@@ -9,6 +9,10 @@ from app.services import docker_manager
 from app.services import nginx_manager
 from app.services.ws_manager import manager
 
+# Сколько ждать подключения WebSocket-клиента (UI стримит логи). По таймауту выпуск
+# НЕ прерывается — продолжается без стрима (ADR-053). Вынесено в константу для тестов.
+WS_WAIT_TIMEOUT = 10.0
+
 
 def acme_preflight(domain: str) -> tuple[bool, str]:
     """Пред-проверка достижимости ACME HTTP-01 challenge ДО запуска certbot.
@@ -80,12 +84,21 @@ async def perform_ssl_issuance(task_id: str, domain: str, is_renew: bool = False
     certbot-контейнера через docker-py exec в отдельном потоке (вывод стримится
     в WebSocket).
     """
+    # Ждём подключения WebSocket-клиента — чтобы UI получил логи С САМОГО НАЧАЛА.
+    # 🔴 КЛЮЧЕВОЕ (ADR-053): по таймауту НЕ выходим, а ПРОДОЛЖАЕМ выпуск. Раньше здесь
+    # был `return` → если WS не подключился за 10 c, certbot НЕ запускался ВООБЩЕ. Это
+    # ломало любой программный вызов без UI: авто-SSL из ЛК/реконсайлера (он дёргает
+    # /api/ssl/issue, но WebSocket не открывает) всегда «падал» пустышкой, хотя ручной
+    # выпуск из панели (UI открывает WS) работал идеально. Выпуск НЕ должен зависеть от
+    # наличия слушателя логов: `manager.send_message` без подключения — безопасный no-op.
     ready_event = manager.register_task(task_id)
     try:
-        await asyncio.wait_for(ready_event.wait(), timeout=10.0)
+        await asyncio.wait_for(ready_event.wait(), timeout=WS_WAIT_TIMEOUT)
     except asyncio.TimeoutError:
-        manager.disconnect(task_id)
-        return
+        # Нет WS-клиента (вызов из реконсайлера/ЛК или CLI) — стримить логи некому,
+        # но сам выпуск SSL запускаем. Задачу НЕ снимаем: WS может подключиться позже
+        # (тогда получит остаток логов); финальная очистка — в `finally`.
+        pass
 
     # --- ИЗМЕНЕНИЕ: Получаем event loop ЗДЕСЬ, в основном потоке ---
     loop = asyncio.get_running_loop()
