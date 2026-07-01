@@ -1378,12 +1378,46 @@ document.addEventListener('DOMContentLoaded', () => {
             await postJSON(null, `/api/applications/${appId}`, { ssl_cert_name: domain }, "SSL выпущен и привязан!", () => { invalidateCache('applications', 'certs'); loadAndDisplayApplications(); }, 'PATCH');
         } catch (err) { /* сообщение уже показано */ }
     }
+    // --- Ожидания доменного пикера (ADR-057) ---
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    // Ждёт исполнения заявки на A-запись реконсайлером ЛК (проход ~45 c). Живой статус в statusEl.
+    async function waitForDnsRequestDone(requestId, statusEl, timeoutMs = 4 * 60 * 1000) {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+            const resp = await fetch('/api/dns/requests', { headers: { 'Authorization': `Bearer ${getToken()}` } });
+            if (resp.ok) {
+                const req = (await resp.json()).find(r => r.id === requestId);
+                if (req && req.status === 'created') { statusEl.innerHTML = '<span style="color:var(--success)">✅ A-запись создана.</span>'; return; }
+                if (req && req.status === 'error') throw new Error(req.note || 'Контрол-плейн не смог создать A-запись.');
+            }
+            const waited = Math.round((Date.now() - started) / 1000);
+            statusEl.textContent = `⏳ Создаём A-запись через контрол-плейн… (${waited} c; обычно до минуты)`;
+            await sleep(5000);
+        }
+        throw new Error('A-запись не создана за отведённое время. Проверьте подключение Рег.ру в ЛК и повторите.');
+    }
+    // Ждёт, пока локальный DNS-чек деплоера подтвердит A-запись (перед выпуском SSL).
+    async function waitForDnsMatch(domain, statusEl, timeoutMs = 5 * 60 * 1000) {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+            try {
+                const d = await checkDns(domain);
+                if (d.matches) { statusEl.innerHTML = '<span style="color:var(--success)">DNS подтверждён.</span>'; return d; }
+            } catch (err) { /* транзиентная ошибка чека — повторим */ }
+            const waited = Math.round((Date.now() - started) / 1000);
+            statusEl.textContent = `⏳ Ждём распространения DNS для ${domain}… (${waited} c)`;
+            await sleep(5000);
+        }
+        throw new Error('DNS не подтвердился за отведённое время. Публикуйте без SSL и выпустите его позже кнопкой в строке.');
+    }
     async function handleCreateApplication(e) {
         e.preventDefault();
         const form = e.target;
         const raw = formToJSON(form);
         const mode = raw.ssl_mode;
-        const domain = raw.domain;
+        const domainMode = document.getElementById('appDomainGroup').dataset.mode || 'manual';
+        const domain = currentAppDomain();
+        if (!domain) { alert('Укажите домен (или субдомен и зону).'); return; }
         const serviceId = parseInt(raw.service_id);
         // Имя пусто → генерируем из имени сервиса (бэкенд требует имя для приложения).
         let name = (raw.name || '').trim();
@@ -1392,6 +1426,27 @@ document.addEventListener('DOMContentLoaded', () => {
             name = uniqueName((srv && srv.name) || 'app', (CACHE.applications || []).map(a => a.name));
         }
         const data = { name, domain, service_id: serviceId, ssl_cert_name: null };
+
+        // Пикер «из готового»: заявка на A-запись → её исполняет реконсайлер ЛК (~1 мин).
+        if (domainMode === 'picker') {
+            const statusEl = document.getElementById('appDnsRequestStatus');
+            const submitBtn = form.querySelector('button[type="submit"]');
+            submitBtn.disabled = true;
+            try {
+                const req = await postJSON(null, '/api/dns/requests', {
+                    zone: document.getElementById('appZoneSelect').value,
+                    subdomain: document.getElementById('appSubdomainInput').value.trim(),
+                });
+                await waitForDnsRequestDone(req.id, statusEl);
+                // Для SSL нужен резолвящийся DNS; без SSL публикуем сразу (запись догонит).
+                if (mode === 'issue') await waitForDnsMatch(domain, statusEl);
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color:var(--danger)">${escapeHTML(err.message)}</span>`;
+                submitBtn.disabled = false;
+                return;
+            }
+            submitBtn.disabled = false;
+        }
 
         if (mode === 'existing') {
             data.ssl_cert_name = raw.ssl_cert_name || null;
@@ -1523,6 +1578,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const at = modalEl.querySelector('[data-toggle-advanced]'); if (at) at.setAttribute('aria-expanded', 'false');
         modalEl.querySelectorAll('.preset-chip').forEach((c, i) => c.classList.toggle('active', i === 0));
     }
+    // Режим ввода домена в модалке публикации (ADR-057): пикер «из готового» ↔ ручной.
+    function setAppDomainMode(mode) {
+        const group = document.getElementById('appDomainGroup');
+        const picker = document.getElementById('appDomainPicker');
+        const manual = document.getElementById('appDomainManual');
+        const form = document.getElementById('applicationForm');
+        group.dataset.mode = mode;
+        picker.style.display = mode === 'picker' ? 'block' : 'none';
+        manual.style.display = mode === 'manual' ? 'block' : 'none';
+        form.elements.domain.required = (mode === 'manual');
+        document.getElementById('appSubdomainInput').required = (mode === 'picker');
+    }
+    // Текущий выбранный домен модалки публикации (независимо от режима).
+    function currentAppDomain() {
+        const mode = document.getElementById('appDomainGroup').dataset.mode || 'manual';
+        if (mode === 'picker') {
+            const sub = document.getElementById('appSubdomainInput').value.trim();
+            const zone = document.getElementById('appZoneSelect').value;
+            return sub && zone ? `${sub}.${zone}` : '';
+        }
+        return document.getElementById('applicationForm').elements.domain.value.trim();
+    }
     async function prepareApplicationModal(prefill = null) {
         const form = document.getElementById('applicationForm');
         form.reset();
@@ -1538,12 +1615,38 @@ document.addEventListener('DOMContentLoaded', () => {
         nameInput.oninput = () => { nameInput.dataset.touched = '1'; };
         attachDnsCheck(form.elements.domain);
 
+        // Доменный пикер «из готового» (ADR-057): зоны пушит контрол-плейн.
+        // Есть зоны → дефолт пикер (максимум готового); нет → только ручной ввод.
+        const dnsReqStatus = document.getElementById('appDnsRequestStatus');
+        dnsReqStatus.textContent = 'A-запись создадим автоматически при публикации.';
+        let dnsZones = [];
+        try {
+            invalidateCache('dnsIntegration'); // зоны мог только что запушить ЛК
+            const dns = await fetchData('dnsIntegration', '/api/integrations/dns');
+            dnsZones = dns.zones || [];
+        } catch (e) { dnsZones = []; }
+        const zoneSelect = document.getElementById('appZoneSelect');
+        populateSelect(zoneSelect, dnsZones.map(z => ({ z })), o => o.z, o => o.z);
+        if (dnsZones.length) zoneSelect.value = dnsZones[0];
+        document.getElementById('appDomainManualBtn').onclick = () => setAppDomainMode('manual');
+        document.getElementById('appDomainPickerBtn').onclick = () => setAppDomainMode('picker');
+        document.getElementById('appDomainPickerBtn').style.display = dnsZones.length ? 'inline' : 'none';
+        setAppDomainMode(dnsZones.length ? 'picker' : 'manual');
+        // Автоподстановка субдомена из имени приложения (пока пользователь не трогал поле).
+        const subInput = document.getElementById('appSubdomainInput');
+        delete subInput.dataset.touched;
+        subInput.oninput = () => { subInput.dataset.touched = '1'; };
+
         const services = await fetchData('services', '/api/services');
         const applications = await fetchData('applications', '/api/applications');
         const onlineServices = services.filter(s => s.status === 'online');
         populateSelect(serviceSelect, onlineServices, srv => `${srv.name} (Port: ${srv.assigned_port})`, srv => srv.id);
-        // Автоген имени приложения из имени выбранного сервиса.
-        const suggestName = () => { const srv = onlineServices.find(s => s.id == serviceSelect.value); if (srv && !nameInput.dataset.touched) nameInput.value = uniqueName(srv.name, (applications || []).map(a => a.name)); };
+        // Автоген имени приложения из имени выбранного сервиса (+ субдомен пикера из имени).
+        const suggestName = () => {
+            const srv = onlineServices.find(s => s.id == serviceSelect.value);
+            if (srv && !nameInput.dataset.touched) nameInput.value = uniqueName(srv.name, (applications || []).map(a => a.name));
+            if (nameInput.value && !subInput.dataset.touched) subInput.value = nameInput.value;
+        };
         serviceSelect.onchange = suggestName;
         if (prefill && prefill.serviceId) serviceSelect.value = prefill.serviceId;
         suggestName();

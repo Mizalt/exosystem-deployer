@@ -84,6 +84,42 @@ class GithubRepo(BaseModel):
     private: bool
 
 
+# --- DNS-интеграция «домен из готового» (ADR-057) ---
+
+class DnsZonesIn(BaseModel):
+    """Список зон, которыми управляет контрол-плейн (пуш ЛК → деплоер, замена целиком)."""
+    zones: List[DomainStr]
+
+
+class DnsIntegrationStatus(BaseModel):
+    connected: bool  # есть ли зоны (= ЛК пушил список)
+    zones: List[str] = []
+
+
+class DnsRecordRequestIn(BaseModel):
+    """Заявка на A-запись из UI публикации: субдомен + зона из известного списка.
+    Субдомен валидируется тем же доменным алфавитом (безопасен для nginx/DNS)."""
+    zone: DomainStr
+    subdomain: DomainStr
+
+
+class DnsRecordRequestOut(BaseModel):
+    id: int
+    zone: str
+    subdomain: str
+    fqdn: str
+    status: str
+    note: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DnsRecordRequestComplete(BaseModel):
+    """Ответ исполнителя (ЛК): заявка выполнена/провалена + заметка для UI."""
+    status: str = Field(..., pattern=r"^(created|error)$")
+    note: Optional[str] = None
+
+
 class AppBlueprintBase(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9-]+$")
     description: Optional[str] = None

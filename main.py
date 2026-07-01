@@ -780,6 +780,68 @@ async def list_github_repos(current_user: CurrentUser, db: Session = Depends(get
     return repos
 
 
+# --- DNS-интеграция «домен из готового» (ADR-057) ---
+# Деплоер сам DNS-записи НЕ создаёт (API Рег.ру доступен только с egress ЛК):
+# ЛК пушит список зон, UI создаёт заявки, реконсайлер ЛК их исполняет (PULL).
+
+@app.get("/api/integrations/dns", response_model=schemas.DnsIntegrationStatus, tags=["Integrations"])
+def get_dns_integration(current_user: CurrentUser, db: Session = Depends(get_db)):
+    zones = [z.domain for z in crud.list_dns_zones(db)]
+    return schemas.DnsIntegrationStatus(connected=bool(zones), zones=zones)
+
+
+@app.post("/api/integrations/dns", response_model=schemas.DnsIntegrationStatus, tags=["Integrations"])
+def set_dns_integration(
+        data: schemas.DnsZonesIn,
+        current_user: CurrentUser, db: Session = Depends(get_db),
+):
+    """Полная замена списка управляемых зон (пуш контрол-плейна, паттерн ADR-055)."""
+    zones = [z.domain for z in crud.replace_dns_zones(db, data.zones)]
+    return schemas.DnsIntegrationStatus(connected=bool(zones), zones=zones)
+
+
+@app.post("/api/dns/requests", response_model=schemas.DnsRecordRequestOut, status_code=201,
+          tags=["Integrations"])
+def create_dns_request(
+        data: schemas.DnsRecordRequestIn,
+        current_user: CurrentUser, db: Session = Depends(get_db),
+):
+    """Заявка на A-запись `subdomain.zone → IP этой ноды` (из модалки публикации)."""
+    known = {z.domain for z in crud.list_dns_zones(db)}
+    if data.zone not in known:
+        raise HTTPException(status_code=400,
+                            detail="Зона не подключена (список зон задаёт контрол-плейн).")
+    fqdn = f"{data.subdomain}.{data.zone}"
+    existing = crud.get_dns_request_by_fqdn(db, fqdn)
+    if existing:
+        if existing.status == "error":
+            # Повторная заявка после ошибки — перезапускаем (идемпотентный ретрай).
+            return crud.complete_dns_request(db, existing.id, "pending", note=None)
+        return existing  # pending/created — идемпотентно отдаём как есть
+    return crud.create_dns_request(db, zone=data.zone, subdomain=data.subdomain, fqdn=fqdn)
+
+
+@app.get("/api/dns/requests", response_model=List[schemas.DnsRecordRequestOut], tags=["Integrations"])
+def list_dns_requests(
+        current_user: CurrentUser, db: Session = Depends(get_db), status: str | None = None,
+):
+    return crud.list_dns_requests(db, status=status)
+
+
+@app.post("/api/dns/requests/{request_id}/complete", response_model=schemas.DnsRecordRequestOut,
+          tags=["Integrations"])
+def complete_dns_request(
+        request_id: int,
+        data: schemas.DnsRecordRequestComplete,
+        current_user: CurrentUser, db: Session = Depends(get_db),
+):
+    """Исполнитель (ЛК) отмечает заявку: created (A-запись есть) | error (+заметка)."""
+    req = crud.complete_dns_request(db, request_id, data.status, data.note)
+    if not req:
+        raise HTTPException(status_code=404, detail="Заявка не найдена.")
+    return req
+
+
 # === УРОВЕНЬ 3: API для Приложений (публичные точки входа) ===
 
 @app.get("/api/applications", tags=["Level 3: Applications"])

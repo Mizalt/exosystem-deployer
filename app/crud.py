@@ -244,3 +244,55 @@ def delete_github_connection(db: Session) -> bool:
     db.delete(conn)
     db.commit()
     return True
+
+
+# --- DNS-интеграция «домен из готового» (ADR-057) ---
+
+def list_dns_zones(db: Session) -> list[models.DnsZone]:
+    return db.query(models.DnsZone).order_by(models.DnsZone.domain).all()
+
+
+def replace_dns_zones(db: Session, domains: list[str]) -> list[models.DnsZone]:
+    """Полная замена списка зон (ЛК пушит актуальный список целиком)."""
+    db.query(models.DnsZone).delete()
+    zones = [models.DnsZone(domain=d) for d in dict.fromkeys(domains)]  # dedupe, порядок
+    db.add_all(zones)
+    db.commit()
+    return list_dns_zones(db)
+
+
+def get_dns_request(db: Session, request_id: int) -> models.DnsRecordRequest | None:
+    return db.query(models.DnsRecordRequest).filter(
+        models.DnsRecordRequest.id == request_id).first()
+
+
+def get_dns_request_by_fqdn(db: Session, fqdn: str) -> models.DnsRecordRequest | None:
+    return db.query(models.DnsRecordRequest).filter(
+        models.DnsRecordRequest.fqdn == fqdn).first()
+
+
+def list_dns_requests(db: Session, status: str | None = None) -> list[models.DnsRecordRequest]:
+    q = db.query(models.DnsRecordRequest)
+    if status:
+        q = q.filter(models.DnsRecordRequest.status == status)
+    return q.order_by(models.DnsRecordRequest.id).all()
+
+
+def create_dns_request(db: Session, zone: str, subdomain: str, fqdn: str) -> models.DnsRecordRequest:
+    req = models.DnsRecordRequest(zone=zone, subdomain=subdomain, fqdn=fqdn, status="pending")
+    db.add(req)
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+def complete_dns_request(db: Session, request_id: int, status: str,
+                         note: str | None = None) -> models.DnsRecordRequest | None:
+    req = get_dns_request(db, request_id)
+    if not req:
+        return None
+    req.status = status
+    req.note = note
+    db.commit()
+    db.refresh(req)
+    return req

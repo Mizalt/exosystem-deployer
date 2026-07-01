@@ -129,3 +129,28 @@ class GithubConnection(Base):
     token_secret = Column(Text, nullable=False)
     login = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- DNS-интеграция «домен из готового» (ADR-057) ---
+
+class DnsZone(Base):
+    """Доменная зона, которой управляет контрол-плейн (ЛК пушит список; деплоер сам
+    записи НЕ создаёт — API Рег.ру доступен только с egress ЛК)."""
+    __tablename__ = "dns_zones"
+    id = Column(Integer, primary_key=True, index=True)
+    domain = Column(String, unique=True, index=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DnsRecordRequest(Base):
+    """Заявка деплоера на A-запись `fqdn → IP этой ноды`. Создаётся из UI публикации,
+    исполняется реконсайлером ЛК (PULL-модель, ADR-057): pending → created | error."""
+    __tablename__ = "dns_record_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    zone = Column(String, nullable=False)        # зона из dns_zones на момент заявки
+    subdomain = Column(String, nullable=False)   # метка(и) слева от зоны
+    fqdn = Column(String, unique=True, index=True, nullable=False)  # subdomain.zone
+    status = Column(String, default="pending", nullable=False)  # pending|created|error
+    note = Column(Text, nullable=True)           # human-заметка исполнителя (ЛК)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

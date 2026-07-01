@@ -135,7 +135,24 @@
                 <div class="form-group"><label>1. Выберите сервис для публикации</label><select name="service_id" required><option disabled selected>Загрузка...</option></select></div>
                 <hr style="border-color: var(--border); margin: 20px 0;">
                 <div class="form-group"><label>2. Имя приложения <span style="color:var(--text-secondary)">— можно оставить как есть</span></label><input type="text" name="name" pattern="^[a-z0-9\\-]+$" placeholder="сгенерируем из имени сервиса"></div>
-                <div class="form-group"><label>3. Домен</label><input type="text" name="domain" required placeholder="app.example.com" autocomplete="off"><div class="dns-inline" data-dns-for="appDomain"></div></div>
+                <div class="form-group" id="appDomainGroup">
+                    <label>3. Домен</label>
+                    <!-- Пикер «из готового» (ADR-057): виден, когда контрол-плейн подключил зоны. -->
+                    <div id="appDomainPicker" style="display:none;">
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <input type="text" id="appSubdomainInput" placeholder="myapp" autocomplete="off" style="flex:1;">
+                            <span style="color:var(--text-secondary);">.</span>
+                            <select id="appZoneSelect" style="flex:1.4;"></select>
+                        </div>
+                        <div id="appDnsRequestStatus" style="font-size:13px; color:var(--text-secondary); margin-top:6px;">A-запись создадим автоматически при публикации.</div>
+                        <button type="button" class="btn-link" id="appDomainManualBtn" style="margin-top:4px;">ввести домен вручную</button>
+                    </div>
+                    <div id="appDomainManual">
+                        <input type="text" name="domain" placeholder="app.example.com" autocomplete="off">
+                        <div class="dns-inline" data-dns-for="appDomain"></div>
+                        <button type="button" class="btn-link" id="appDomainPickerBtn" style="display:none; margin-top:4px;">выбрать из подключённых доменов</button>
+                    </div>
+                </div>
                 <div class="form-group">
                     <label>4. SSL / HTTPS</label>
                     <select name="ssl_mode" id="appSslMode">
