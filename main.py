@@ -35,7 +35,7 @@ from app import run_config
 from app import security_headers
 from app.environment import get_docker_client
 from app.database import get_db, init_db_with_migrations, SessionLocal
-from app.routers import proxy, ssl, panel, auth
+from app.routers import proxy, ssl, panel, auth, control_plane
 from app.services import docker_manager, nginx_manager, nginx_service, build_service
 from app.services.ws_manager import manager as ws_manager
 
@@ -121,6 +121,7 @@ app.include_router(ssl.router)
 app.include_router(proxy.router)
 app.include_router(panel.router)
 app.include_router(auth.router)
+app.include_router(control_plane.router)  # cpk-эндпоинты; без env-ключа отвечают 404
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
