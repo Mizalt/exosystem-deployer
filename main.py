@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
         print("INFO: Orchestrator task cancelled successfully.")
 
 
-app = FastAPI(title="Cloud Deploy Panel", lifespan=lifespan)
+app = FastAPI(title="EXOSYSTEM DEPLOY", lifespan=lifespan)
 
 
 @app.middleware("http")

@@ -150,7 +150,11 @@ def auth_client(api_env):
 @pytest.fixture
 def cloud_env():
     from app.cloud.database import CloudBase, get_cloud_db
-    from app.cloud.app import cloud_app
+    from app.cloud.app import cloud_app, cloud_login_limiter
+
+    # Лимитер логина — процессный синглтон с ключом ip:testclient (общим для всех тестов),
+    # чистим на каждый тест, чтобы неудачи одного не «протекали» в другой (Ночь 4).
+    cloud_login_limiter.clear()
 
     engine = create_engine(
         "sqlite://",

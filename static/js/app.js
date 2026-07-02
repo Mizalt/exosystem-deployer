@@ -23,7 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
         services: `
             <div class="stage-toolbar">
                 <div class="stage-toolbar-text"><h2>Сервисы</h2><span>Запущенные контейнеры (внутренний порт)</span></div>
-                <button class="btn btn-primary" id="newServiceBtn"><span class="material-symbols-outlined">rocket_launch</span>Запустить сервис</button>
+                <button class="btn btn-primary" id="newServiceBtn"><span class="material-symbols-outlined">bolt</span>Запустить сервис</button>
             </div>
             <div class="content-area">
                 <div class="services-list" id="servicesContainer"><div class="section-title">Загрузка...</div></div>
@@ -1062,10 +1062,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // в истории (compact) — компактные иконки (история живёт в overlay со скроллом,
             // вложенный дропдаун там обрезался бы overflow'ом, поэтому иконки).
             const versionActions = (art, bp, compact) => compact
-                ? `<button class="icon-btn run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">rocket_launch</span></button>
+                ? `<button class="icon-btn run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">bolt</span></button>
                    <button class="icon-btn dl-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-name="${escapeHTML(bp.name)}" data-tag="${escapeHTML(art.version_tag)}" title="Скачать ZIP"><span class="material-symbols-outlined">download</span></button>
                    <button class="icon-btn danger del-artifact-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" data-tag="${escapeHTML(art.version_tag)}" title="Удалить версию"><span class="material-symbols-outlined">delete</span></button>`
-                : `<button class="btn-icon-label run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">rocket_launch</span>Запустить</button>
+                : `<button class="btn-icon-label run-service-btn" data-art-id="${art.id}" data-bp-id="${bp.id}" title="Запустить сервис из этой версии"><span class="material-symbols-outlined">bolt</span>Запустить</button>
                    <div class="dropdown">
                        <button class="icon-btn" data-toggle="dropdown" title="Ещё"><span class="material-symbols-outlined">more_vert</span></button>
                        <div class="dropdown-menu">
@@ -1810,6 +1810,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.querySelectorAll('.nav-item').forEach(link => link.onclick = e => { if (e.currentTarget.id === 'logoutBtn') return; e.preventDefault(); const page = e.currentTarget.dataset.page; if (window.location.hash !== `#${page}`) window.location.hash = page; });
     window.addEventListener('hashchange', () => navigate(window.location.hash.substring(1) || 'services'));
+
+    // SSO из ЛК (ADR-034 Phase 1): токен приходит во fragment `#sso_token=…` — фрагмент
+    // НЕ уходит на сервер (нет в логах прокси). Подхватываем, чистим адрес, дальше — как
+    // обычный вход. Активно только когда фрагмент присутствует (иначе no-op).
+    (() => {
+        const m = window.location.hash.match(/[#&]sso_token=([^&]+)/);
+        if (m) {
+            setToken(decodeURIComponent(m[1]));
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    })();
 
     // --- Инициализация Приложения ---
     if (getToken()) {
