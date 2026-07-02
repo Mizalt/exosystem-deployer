@@ -18,9 +18,13 @@
 body { background-color: var(--bg-main); color: var(--text-primary); font-family: 'Google Sans', 'Roboto', sans-serif; height: 100vh; display: flex; overflow: hidden; }
 aside { width: var(--sidebar-width); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 12px; }
 .logo { padding: 12px 16px; font-size: 20px; font-weight: 500; display: flex; align-items: center; gap: 12px; margin-bottom: 20px; color: var(--accent); }
-.nav-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; text-decoration: none; color: var(--text-primary); border-radius: 100px; margin-bottom: 4px; transition: 0.2s; cursor: pointer; }
+.nav-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; text-decoration: none; color: var(--text-primary); border-radius: 100px; margin-bottom: 4px; transition: 0.2s; cursor: pointer; font-size: 14px; }
 .nav-item:hover { background-color: var(--bg-hover); }
 .nav-item.active { background-color: var(--bg-active); color: var(--accent); }
+.nav-item.danger { color: var(--danger); }
+.nav-item.danger:hover { background: rgba(242, 139, 130, 0.1); }
+.sidebar-foot { margin-top: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.logo-dim { color: var(--text-secondary); font-weight: 400; }
 main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
 header { padding: 24px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
 .search-bar { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 28px; padding: 8px 20px; display: flex; align-items: center; gap: 10px; width: 400px; }
