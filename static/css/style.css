@@ -163,6 +163,9 @@ header { padding: 24px 32px; display: flex; justify-content: space-between; alig
     color: var(--accent);
     font-size: 13px;
 }
+/* Кликабельная строка таблицы (строка приложения → боковой drawer с деталями). */
+.styled-table tr.clickable-row { cursor: pointer; transition: background 0.15s; }
+.styled-table tr.clickable-row:hover { background: var(--bg-hover); }
 .dns-result {
     margin-top: 16px;
     padding: 16px;
@@ -559,9 +562,32 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 @keyframes tc-pulse { 0%,100% { box-shadow: 0 8px 24px rgba(0,0,0,0.45); } 50% { box-shadow: 0 0 0 6px rgba(168,199,250,0.18), 0 8px 24px rgba(0,0,0,0.45); } }
 .task-center-badge { position: absolute; top: -4px; right: -4px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: #0a1a33; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
 .task-center-panel { position: absolute; right: 0; bottom: 64px; width: 380px; max-width: calc(100vw - 32px); max-height: 70vh; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); display: flex; flex-direction: column; overflow: hidden; }
-.task-center-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 14px 18px; border-bottom: 1px solid var(--border); }
+/* Важно: атрибут [hidden] должен реально скрывать эти flex-элементы. Класс .task-center-*
+   задаёт display:flex и (как автор-правило) перебивает UA-правило [hidden]{display:none},
+   из-за чего крестик «Закрыть» не работал (панель висела всегда открытой) и бейдж не гас. */
+.task-center-panel[hidden], .task-center-badge[hidden] { display: none; }
+.task-center-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 10px 14px; border-bottom: 1px solid var(--border); gap: 8px; }
 .task-center-head h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
+.task-center-tabs { display: flex; gap: 4px; }
+.tc-tab { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 6px 10px; border-radius: 10px; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.tc-tab:hover { background: var(--bg-hover); }
+.tc-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 500; }
+.tc-tab-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: #0a1a33; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.tc-tab-count[hidden] { display: none; }
 .task-center-list { padding: 10px; overflow-y: auto; }
+.task-center-notifs { display: flex; flex-direction: column; overflow: hidden; }
+.task-center-notifs[hidden] { display: none; }
+.tc-notifs-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.tc-notifs-head .muted { color: var(--text-secondary); font-size: 12px; }
+.tc-notifs-list { padding: 8px 10px; overflow-y: auto; max-height: 50vh; }
+.tc-notif { display: flex; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.tc-notif:last-child { border-bottom: none; }
+.tc-notif .tc-notif-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 5px; flex-shrink: 0; }
+.tc-notif.success .tc-notif-dot { background: var(--success); }
+.tc-notif.error .tc-notif-dot { background: var(--danger); }
+.tc-notif-body { flex: 1; min-width: 0; }
+.tc-notif-time { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+.tc-notifs-empty { color: var(--text-secondary); text-align: center; padding: 24px 12px; font-size: 13px; }
 .task-center-empty { color: var(--text-secondary); text-align: center; padding: 24px 12px; font-size: 13px; line-height: 1.5; }
 .task-item { background: var(--bg-main); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
 .task-item:last-child { margin-bottom: 0; }
@@ -580,9 +606,14 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .task-item-log pre { margin-top: 6px; background: #000; border-radius: 10px; padding: 10px; font-family: 'Roboto Mono', monospace; font-size: 11px; color: #bbb; max-height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 .task-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: tc-spin 0.9s linear infinite; flex-shrink: 0; }
 @keyframes tc-spin { to { transform: rotate(360deg); } }
-/* Мини-тост «уведомление о результате задачи» */
-.tc-toast-wrap { position: fixed; right: 24px; bottom: 88px; z-index: 950; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-.tc-toast { background: var(--bg-surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 12px; padding: 12px 16px; max-width: 340px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); font-size: 13px; animation: tc-slide 0.25s ease; }
+/* Мини-тост «уведомление о результате задачи» — сверху по центру, чтобы не
+   перекрывать элементы управления справа внизу (запрос пользователя). */
+.tc-toast-wrap { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 1200; display: flex; flex-direction: column; gap: 8px; align-items: center; max-width: calc(100vw - 32px); }
+.tc-toast { display: flex; align-items: flex-start; gap: 10px; background: var(--bg-surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 12px; padding: 12px 12px 12px 16px; max-width: 460px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); font-size: 13px; animation: tc-slide 0.25s ease; }
 .tc-toast.success { border-left-color: var(--success); }
 .tc-toast.error { border-left-color: var(--danger); }
-@keyframes tc-slide { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+.tc-toast-msg { flex: 1; }
+.tc-toast-close { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; display: flex; flex-shrink: 0; }
+.tc-toast-close:hover { color: var(--text-primary); }
+.tc-toast-close .material-symbols-outlined { font-size: 18px; }
+@keyframes tc-slide { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: none; } }

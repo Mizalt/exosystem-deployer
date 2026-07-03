@@ -242,8 +242,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const stageInit = (stage) => ({ blueprints: initBlueprintsPage, services: initServicesPage, applications: initApplicationsPage }[stage]);
 
     // Рендер единой страницы «Конвейер»: степпер сверху + контент текущей стадии.
-    const renderPipeline = () => {
+    // pickDefault=true (открытие «Конвейера» из меню, а не переход на конкретную стадию):
+    // если есть опубликованные приложения — открываем сразу «Приложения» (обычно
+    // пользователь идёт смотреть/управлять именно ими), иначе — начало «Библиотека».
+    const renderPipeline = async (pickDefault) => {
         mainContent.innerHTML = templates.pipeline;
+        if (pickDefault) {
+            try {
+                const apps = await fetchData('applications', '/api/applications');
+                currentStage = (Array.isArray(apps) && apps.length) ? 'applications' : 'blueprints';
+            } catch (_) { /* тихо — оставляем текущую стадию */ }
+        }
         document.getElementById('pipelineRailHost').innerHTML = railHTML(currentStage);
         mainContent.querySelectorAll('.pipeline-stage').forEach(stage => stage.onclick = () => switchStage(stage.dataset.stage));
         switchStage(currentStage);
@@ -267,9 +276,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const navigate = (page) => {
         // Прямые хэши стадий (#services и т.п.) открывают конвейер на нужной стадии
         // (обратная совместимость + переходы «Запустить»/«Опубликовать»).
+        let freshPipeline = false;
         if (PIPELINE_STAGES.some(s => s.page === page)) { currentStage = page; page = 'pipeline'; }
+        else if (page === 'pipeline') { freshPipeline = true; }  // клик по «Конвейер» в меню → умный дефолт стадии
         if (page === 'pipeline') {
-            renderPipeline();
+            renderPipeline(freshPipeline);
         } else {
             mainContent.innerHTML = templates[page] || `<p>Страница не найдена</p>`;
             const initFunctions = { dashboard: initDashboardPage, ssl: initSslPage, settings: initSettingsPage };
@@ -1323,7 +1334,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const proto = app.ssl_cert_name ? 'https' : 'http';
                 const sslCell = app.ssl_cert_name ? `✅ ${escapeHTML(app.ssl_cert_name)}` : '❌ HTTP';
                 const issueBtn = app.ssl_cert_name ? '' : `<button class="btn-icon-label issue-app-ssl-btn" data-app-id="${app.id}" data-domain="${escapeHTML(app.domain)}" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span>Выпустить SSL</button>`;
-                return `<tr>
+                return `<tr class="app-row clickable-row" data-app-id="${app.id}" title="Открыть детали приложения">
                     <td>${escapeHTML(app.name)}</td>
                     <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a></td>
                     <td><span class="mono">${escapeHTML(app.service.name)}</span></td>
@@ -1335,6 +1346,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     </span></td>
                 </tr>`;
             }).join('');
+            // Клик по строке (не по кнопке/ссылке) открывает тот же боковой drawer, что и на
+            // дашборде — детальный просмотр опубликованного приложения (запрос пользователя).
+            tableBody.querySelectorAll('tr.app-row[data-app-id]').forEach(tr => tr.addEventListener('click', (e) => {
+                if (e.target.closest('button, a')) return;
+                openDetailDrawer('app', parseInt(tr.dataset.appId, 10));
+            }));
             tableBody.querySelectorAll('.del-app-btn').forEach(btn => btn.onclick = () => handleApplicationDelete(btn.dataset.appId, btn.dataset.appName));
             tableBody.querySelectorAll('.edit-app-btn').forEach(btn => btn.onclick = () => openEditApplicationModal(apps.find(a => a.id == btn.dataset.appId)));
             tableBody.querySelectorAll('.issue-app-ssl-btn').forEach(btn => btn.onclick = () => handleIssueAppSsl(btn.dataset.appId, btn.dataset.domain));
@@ -1526,15 +1543,18 @@ document.addEventListener('DOMContentLoaded', () => {
         picker.style.display = mode === 'picker' ? 'block' : 'none';
         manual.style.display = mode === 'manual' ? 'block' : 'none';
         form.elements.domain.required = (mode === 'manual');
-        document.getElementById('appSubdomainInput').required = (mode === 'picker');
+        // Субдомен в пикере необязателен: пусто = публикация на сам домен (apex, Задача 2).
+        document.getElementById('appSubdomainInput').required = false;
     }
     // Текущий выбранный домен модалки публикации (независимо от режима).
+    // В пикере пустой субдомен = сам домен зоны (публикация на ПОЛНЫЙ домен).
     function currentAppDomain() {
         const mode = document.getElementById('appDomainGroup').dataset.mode || 'manual';
         if (mode === 'picker') {
             const sub = document.getElementById('appSubdomainInput').value.trim();
             const zone = document.getElementById('appZoneSelect').value;
-            return sub && zone ? `${sub}.${zone}` : '';
+            if (!zone) return '';
+            return sub ? `${sub}.${zone}` : zone;
         }
         return document.getElementById('applicationForm').elements.domain.value.trim();
     }
@@ -1667,8 +1687,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Долгие операции (публикация с DNS-ожиданием, выпуск SSL) идут в фоне на сервере
     // (модель PendingAction), а UI лишь показывает их статус и уведомляет о результате.
     let taskCenterOpen = false;
+    let taskCenterTab = 'tasks';   // 'tasks' | 'notifs' — активная вкладка панели
     let taskCenterKnown = {};   // id -> последний виденный статус (для тостов-уведомлений)
     const TASK_STATUS_RU = { pending: 'в очереди', running: 'выполняется', done: 'готово', error: 'ошибка' };
+    const NOTIF_MAX = 100;      // сколько последних системных уведомлений храним в истории
+    let notifHistory = loadNotifHistory();
+
+    function loadNotifHistory() {
+        try { return JSON.parse(localStorage.getItem('tcNotifHistory') || '[]'); } catch (_) { return []; }
+    }
+    function saveNotifHistory() {
+        try { localStorage.setItem('tcNotifHistory', JSON.stringify(notifHistory.slice(0, NOTIF_MAX))); } catch (_) { /* переполнение — не критично */ }
+    }
 
     function initTaskCenter() {
         const tc = document.getElementById('taskCenter');
@@ -1678,13 +1708,27 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('taskCenterToggle').onclick = () => {
             taskCenterOpen = !taskCenterOpen;
             document.getElementById('taskCenterPanel').hidden = !taskCenterOpen;
-            if (taskCenterOpen) refreshTaskCenter();
+            if (taskCenterOpen) { refreshTaskCenter(); renderNotifs(); }
         };
         document.getElementById('taskCenterClose').onclick = () => {
             taskCenterOpen = false;
             document.getElementById('taskCenterPanel').hidden = true;
         };
+        tc.querySelectorAll('.tc-tab').forEach(t => t.onclick = () => switchTaskCenterTab(t.dataset.tcTab));
+        const clearBtn = document.getElementById('tcNotifClear');
+        if (clearBtn) clearBtn.onclick = () => { notifHistory = []; saveNotifHistory(); renderNotifs(); updateNotifBadge(); };
+        switchTaskCenterTab('tasks');
+        updateNotifBadge();
         refreshTaskCenter();
+    }
+    function switchTaskCenterTab(tab) {
+        taskCenterTab = tab;
+        document.querySelectorAll('#taskCenter .tc-tab').forEach(t => t.classList.toggle('active', t.dataset.tcTab === tab));
+        const list = document.getElementById('taskCenterList');
+        const notifs = document.getElementById('taskCenterNotifs');
+        if (list) list.hidden = tab !== 'tasks';
+        if (notifs) notifs.hidden = tab !== 'notifs';
+        if (tab === 'notifs') renderNotifs();
     }
     function teardownTaskCenter() {
         const tc = document.getElementById('taskCenter');
@@ -1778,13 +1822,47 @@ document.addEventListener('DOMContentLoaded', () => {
         taskCenterKnown = Object.fromEntries(actions.map(a => [a.id, a.status]));
     }
     function tcToast(msg, kind) {
+        pushNotif(msg, kind);  // любое уведомление попадает в историю (последние 100)
         let wrap = document.getElementById('tcToastWrap');
         if (!wrap) { wrap = document.createElement('div'); wrap.id = 'tcToastWrap'; wrap.className = 'tc-toast-wrap'; document.body.appendChild(wrap); }
         const el = document.createElement('div');
         el.className = `tc-toast ${kind || ''}`;
-        el.textContent = msg;
+        el.innerHTML = `<span class="tc-toast-msg"></span><button type="button" class="tc-toast-close" aria-label="Закрыть"><span class="material-symbols-outlined">close</span></button>`;
+        el.querySelector('.tc-toast-msg').textContent = msg;
+        const dismiss = () => { el.style.transition = 'opacity .3s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 300); };
+        el.querySelector('.tc-toast-close').onclick = dismiss;  // × — быстро скипнуть уведомление
         wrap.appendChild(el);
-        setTimeout(() => { el.style.transition = 'opacity .3s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 6000);
+        setTimeout(dismiss, 6000);
+    }
+    // --- История системных уведомлений (запрос пользователя): последние 100, вкладка «Уведомления» ---
+    function pushNotif(msg, kind) {
+        notifHistory.unshift({ t: Date.now(), msg: String(msg), kind: kind || '' });
+        if (notifHistory.length > NOTIF_MAX) notifHistory.length = NOTIF_MAX;
+        saveNotifHistory();
+        updateNotifBadge();
+        if (taskCenterOpen && taskCenterTab === 'notifs') renderNotifs();
+    }
+    function updateNotifBadge() {
+        const c = document.getElementById('tcNotifCount');
+        if (!c) return;
+        c.hidden = notifHistory.length === 0;
+        c.textContent = String(notifHistory.length);
+    }
+    function renderNotifs() {
+        const list = document.getElementById('tcNotifList');
+        if (!list) return;
+        if (!notifHistory.length) {
+            list.innerHTML = `<div class="tc-notifs-empty">Уведомлений пока нет.<br>Здесь копятся системные события (публикация, SSL, ошибки).</div>`;
+            return;
+        }
+        list.innerHTML = notifHistory.map(n => `
+            <div class="tc-notif ${n.kind || ''}">
+                <span class="tc-notif-dot"></span>
+                <div class="tc-notif-body">
+                    <div class="tc-notif-msg">${escapeHTML(n.msg)}</div>
+                    <div class="tc-notif-time">${new Date(n.t).toLocaleString()}</div>
+                </div>
+            </div>`).join('');
     }
 
     async function pollTick() {
