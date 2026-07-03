@@ -32,6 +32,7 @@ CAPABILITIES = (
     "github_import",    # импорт версий из GitHub, в т.ч. приватных (ADR-033/055)
     "advanced_build",   # расширенный режим сборки: база/команда/порт/env (ADR-021)
     "replicas_scale",   # масштабирование реплик + round-robin в прокси (ADR-020)
+    "self_update",      # самообновление/откат: POST /api/admin/{update,rollback} (cpk, ADR-071)
 )
 
 

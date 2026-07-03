@@ -154,8 +154,18 @@ def get_version_info():
     Без авторизации — только несекретные метаданные сборки. ЛК опрашивает этот
     эндпоинт и адаптирует UI/действия по `capabilities` (совместимость со ВСЕМИ
     версиями нод), а не по номеру версии. Старая нода без эндпоинта → 404.
+    После самообновления добавляется блок `update` из data/update_state.json
+    (current/previous ref, статус) — его пишет updater-джоба (self_update).
     """
-    return deployer_version.describe()
+    info = deployer_version.describe()
+    from app.services.self_update import read_update_state
+    state = read_update_state()
+    if state:
+        info["update"] = {k: state[k] for k in
+                          ("current_ref", "previous_ref", "failed_ref", "status", "updated_at")
+                          if state.get(k)}
+        info["git_sha"] = info["git_sha"] or state.get("current_ref")
+    return info
 
 
 # === СОВМЕСТИМОСТЬ С СЕРВИСАМИ ДЛЯ ФРОНТЕНДА (/api/services) ===

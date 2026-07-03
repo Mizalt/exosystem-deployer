@@ -294,10 +294,63 @@ def _handle_panel_ssl(db, action) -> None:
     _advance_ssl(db, action, params, domain, on_success=lambda: _save_panel(domain, domain))
 
 
+def _handle_self_update(db, action) -> None:
+    """Самообновление деплоера (Ночь 11, ADR-071): запустить updater-джобу на хосте
+    и следить за ней. Своп контейнера убивает ЭТОТ процесс — задача переживает его
+    в БД, и НОВЫЙ процесс доводит её (видит exit-код updater'а)."""
+    from app.services import self_update
+
+    params = _load(action)
+    if not params.get("started"):
+        try:
+            self_update.launch_updater(params.get("ref"))
+        except self_update.SelfUpdateError as e:
+            _fail(action, str(e))
+            return
+        params["started"] = True
+        _store(action, params)
+        _append_log(action, "Updater запущен: build-first, при провале health — авто-откат. "
+                            "Панель может быть недоступна несколько секунд в момент переключения.")
+        action.status = "running"
+        action.next_check_at = _due_in(10)
+        return
+
+    state, code, logs = self_update.updater_status()
+    if state == "running":
+        action.attempts = (action.attempts or 0) + 1
+        if action.attempts > 90:  # ~15 мин — сборка+health давно должны были кончиться
+            _fail(action, "Updater не завершился за отведённое время — проверьте контейнер "
+                          f"«{self_update.UPDATER_CONTAINER}» и журнал docker.")
+            return
+        action.next_check_at = _due_in(10)
+        return
+    if state == "missing":
+        _fail(action, "Updater-контейнер исчез до завершения (удалён вручную?).")
+        return
+
+    if logs:
+        _append_log(action, logs)
+    self_update.cleanup_updater()
+    if code == 0:
+        if "ALREADY_UP_TO_DATE" in logs:
+            _done(action, "Уже актуальная версия — обновление не потребовалось.")
+            return
+        cur = (self_update.read_update_state().get("current_ref") or "")[:12]
+        _done(action, f"Обновление применено{' (' + cur + ')' if cur else ''}.")
+    elif code == 3:
+        _fail(action, "Сборка новой версии провалилась — работающая версия не тронута (build-first).")
+    elif code == 42:
+        _fail(action, "Новая версия не прошла проверку здоровья — выполнен автоматический "
+                      "откат на прежнюю версию.")
+    else:
+        _fail(action, f"Updater завершился с кодом {code} — подробности в журнале выше.")
+
+
 HANDLERS = {
     "publish_on_dns": _handle_publish,
     "issue_ssl": _handle_issue_ssl,
     "panel_ssl": _handle_panel_ssl,
+    "self_update": _handle_self_update,
 }
 
 
