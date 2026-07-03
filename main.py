@@ -35,12 +35,13 @@ from app import run_config
 from app import security_headers
 from app.environment import get_docker_client
 from app.database import get_db, init_db_with_migrations, SessionLocal
-from app.routers import proxy, ssl, panel, auth, control_plane
+from app.routers import proxy, ssl, panel, auth, control_plane, pending
 from app.services import docker_manager, nginx_manager, nginx_service, build_service
 from app.services.ws_manager import manager as ws_manager
 
 import asyncio
 from app.services.orchestrator import run_orchestrator_loop
+from app.services.pending_actions import run_pending_actions_loop
 
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -92,16 +93,20 @@ async def lifespan(app: FastAPI):
         db.close()
 
     orchestrator_task = asyncio.create_task(run_orchestrator_loop())
+    # Фоновый чекер долгих операций (публикация/SSL/DNS) — Ночь 10, ADR-069.
+    pending_task = asyncio.create_task(run_pending_actions_loop())
     print("SUCCESS: Infrastructure ready and Orchestrator started.")
 
     yield
 
     print("--- Running shutdown tasks ---")
     orchestrator_task.cancel()
-    try:
-        await orchestrator_task
-    except asyncio.CancelledError:
-        print("INFO: Orchestrator task cancelled successfully.")
+    pending_task.cancel()
+    for task, label in ((orchestrator_task, "Orchestrator"), (pending_task, "Pending-actions")):
+        try:
+            await task
+        except asyncio.CancelledError:
+            print(f"INFO: {label} task cancelled successfully.")
 
 
 app = FastAPI(title="EXOSYSTEM DEPLOY", lifespan=lifespan)
@@ -122,6 +127,7 @@ app.include_router(proxy.router)
 app.include_router(panel.router)
 app.include_router(auth.router)
 app.include_router(control_plane.router)  # cpk-эндпоинты; без env-ключа отвечают 404
+app.include_router(pending.router)  # центр фоновых задач (публикация/SSL) — ADR-069
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

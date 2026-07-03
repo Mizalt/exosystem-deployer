@@ -213,3 +213,39 @@ class Application(ApplicationBase):
 
 class IssueSSLRequest(BaseModel):
     domain: DomainStr  # валидируется (домен уходит аргументом в certbot)
+
+
+# --- Фоновые задачи панели (Ночь 10, ADR-069) ---
+
+class PendingActionOut(BaseModel):
+    id: int
+    type: str
+    status: str
+    title: Optional[str] = None
+    log: Optional[str] = None
+    result: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PublishAsyncRequest(BaseModel):
+    """Асинхронная публикация сервиса: создаётся фоновая задача, UI сразу отпускается.
+    Для `issue` задача ждёт распространения DNS (до суток) и выпускает SSL в фоне."""
+    service_id: int
+    domain: DomainStr  # валидируется (уходит в nginx-конфиг/certbot)
+    name: Optional[str] = None  # авто из имени сервиса, если пусто
+    ssl_mode: str = Field(default="issue", pattern=r"^(none|issue|existing)$")
+    existing_cert: OptionalCertName = None
+    # Пикер «домен из готового» (ADR-057): заявка на A-запись создаётся синхронно.
+    zone: OptionalDomainStr = None
+    subdomain: OptionalDomainStr = None
+
+
+class IssueSslAsyncRequest(BaseModel):
+    domain: DomainStr
+    app_id: Optional[int] = None  # если задан — привязать выпущенный сертификат к приложению
+
+
+class PanelSslAsyncRequest(BaseModel):
+    domain: DomainStr

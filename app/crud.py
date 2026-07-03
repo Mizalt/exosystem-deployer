@@ -1,5 +1,6 @@
 # --- app/crud.py ---
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 from . import models, schemas
 from . import security
@@ -296,3 +297,44 @@ def complete_dns_request(db: Session, request_id: int, status: str,
     db.commit()
     db.refresh(req)
     return req
+
+
+# --- Фоновые задачи панели (Ночь 10, ADR-069) ---
+
+def create_pending_action(db: Session, type: str, title: str | None,
+                          params: str | None) -> models.PendingAction:
+    action = models.PendingAction(type=type, title=title, params=params, status="pending")
+    db.add(action)
+    db.commit()
+    db.refresh(action)
+    return action
+
+
+def get_pending_action(db: Session, action_id: int) -> models.PendingAction | None:
+    return db.query(models.PendingAction).filter(
+        models.PendingAction.id == action_id).first()
+
+
+def list_pending_actions(db: Session, active_only: bool = False,
+                         limit: int = 50) -> list[models.PendingAction]:
+    q = db.query(models.PendingAction)
+    if active_only:
+        q = q.filter(models.PendingAction.status.in_(["pending", "running"]))
+    return q.order_by(models.PendingAction.id.desc()).limit(limit).all()
+
+
+def list_due_pending_actions(db: Session, now) -> list[models.PendingAction]:
+    """Активные задачи, которым пора: срок не задан или наступил."""
+    return db.query(models.PendingAction).filter(
+        models.PendingAction.status.in_(["pending", "running"]),
+        or_(models.PendingAction.next_check_at.is_(None),
+            models.PendingAction.next_check_at <= now),
+    ).order_by(models.PendingAction.id).all()
+
+
+def delete_pending_action(db: Session, action_id: int) -> models.PendingAction | None:
+    action = get_pending_action(db, action_id)
+    if action:
+        db.delete(action)
+        db.commit()
+    return action
