@@ -31,6 +31,7 @@ from app import crud, schemas, panel_config, models, security, config, bootstrap
 from app import github_client
 from app import environment
 from app import editions
+from app import version as deployer_version
 from app import run_config
 from app import security_headers
 from app.environment import get_docker_client
@@ -144,6 +145,17 @@ async def read_root():
 def get_edition(current_user: CurrentUser):
     """Текущее издание и доступность фич (open-core: oss/pro/cloud). См. ADR-019."""
     return editions.describe()
+
+
+@app.get("/api/version", tags=["System"])
+def get_version_info():
+    """Публично: версия сборки деплоера + `capabilities` (Ночь 11, ADR-071).
+
+    Без авторизации — только несекретные метаданные сборки. ЛК опрашивает этот
+    эндпоинт и адаптирует UI/действия по `capabilities` (совместимость со ВСЕМИ
+    версиями нод), а не по номеру версии. Старая нода без эндпоинта → 404.
+    """
+    return deployer_version.describe()
 
 
 # === СОВМЕСТИМОСТЬ С СЕРВИСАМИ ДЛЯ ФРОНТЕНДА (/api/services) ===
