@@ -244,6 +244,20 @@ def test_enqueue_publish_picker_creates_dns_request(auth_client):
     assert any(x["fqdn"] == "app.example.com" for x in reqs)
 
 
+def test_enqueue_publish_apex_full_domain(auth_client):
+    """Задача 2: пустой субдомен при выбранной зоне → apex («@»), fqdn = сам домен."""
+    client, Session = auth_client
+    dep_id = _seed_deployment(Session)
+    client.post("/api/integrations/dns", json={"zones": ["example.com"]})
+    r = client.post("/api/pending-actions/publish",
+                    json={"service_id": dep_id, "domain": "example.com",
+                          "zone": "example.com"})  # субдомен не передан → apex
+    assert r.status_code == 201, r.text
+    reqs = client.get("/api/dns/requests").json()
+    apex = [x for x in reqs if x["fqdn"] == "example.com"]
+    assert apex and apex[0]["subdomain"] == "@"
+
+
 def test_enqueue_issue_ssl_and_panel_ssl(auth_client):
     client, _ = auth_client
     assert client.post("/api/pending-actions/issue-ssl",

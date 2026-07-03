@@ -59,15 +59,17 @@ def enqueue_publish(data: schemas.PublishAsyncRequest, current_user: CurrentUser
 
     # Пикер «домен из готового» (ADR-057): заявку на A-запись создаём сразу, её
     # исполнит реконсайлер ЛК, а фоновая задача дождётся распространения DNS.
-    if data.zone and data.subdomain:
+    # Пустой субдомен при выбранной зоне → apex («@»): публикация на ПОЛНЫЙ домен (Задача 2).
+    if data.zone:
         known = {z.domain for z in crud.list_dns_zones(db)}
         if data.zone not in known:
             raise HTTPException(status_code=400,
                                 detail="Зона не подключена (список зон задаёт контрол-плейн).")
-        fqdn = f"{data.subdomain}.{data.zone}"
+        sub = (data.subdomain or "").strip() or "@"
+        fqdn = data.zone if sub == "@" else f"{sub}.{data.zone}"
         existing = crud.get_dns_request_by_fqdn(db, fqdn)
         if not existing:
-            crud.create_dns_request(db, zone=data.zone, subdomain=data.subdomain, fqdn=fqdn)
+            crud.create_dns_request(db, zone=data.zone, subdomain=sub, fqdn=fqdn)
         elif existing.status == "error":
             crud.complete_dns_request(db, existing.id, "pending", note=None)
 
