@@ -150,6 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!window.location.hash) window.location.replace('#' + initialPage);
         navigate(initialPage);
         startPolling();  // live-обновление статусов/логов
+        initTaskCenter();  // центр фоновых задач (Ночь 10, ADR-069)
     };
 
     // Обработчики submit модалок раньше навешивались только в init-функциях стадий;
@@ -203,6 +204,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopPolling();
         clearToken();
         invalidateCache('groups', 'blueprints', 'services', 'applications', 'certs');
+        teardownTaskCenter();
         showLoginScreen();
     });
 
@@ -935,30 +937,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (mode === 'existing') {
             sslCertName = panelForm.elements.ssl_cert_name.value || null;
         } else if (mode === 'issue') {
+            // Выпуск SSL для домена панели — в ФОН (Ночь 10): задача сохранит домен по HTTP,
+            // дождётся распространения DNS, выпустит сертификат и привяжет его к панели.
             const dnsStatus = document.getElementById('panelDnsStatus');
-            const logWindow = document.getElementById('panelSslLogWindow');
             btn.disabled = true;
             try {
-                dnsStatus.textContent = 'Проверка DNS...';
-                const dns = await checkDns(domain);
-                if (!dns.matches) {
-                    dnsStatus.innerHTML = `<span style="color:var(--danger)">A-запись не указывает на сервер (сервер: ${dns.server_ip || 'N/A'}, домен: ${dns.domain_ip || 'N/A'}). Выпуск невозможен.</span>`;
-                    btn.disabled = false; return;
-                }
-                dnsStatus.innerHTML = dns.warning
-                    ? `<span style="color:var(--warning,#e0a000)">⚠️ ${escapeHTML(dns.warning)} Пробую выпустить…</span>`
-                    : `<span style="color:var(--success)">DNS OK. Готовлю домен и выпускаю сертификат...</span>`;
-                // 1) Домен по HTTP — чтобы webroot-челлендж резолвился на этом домене.
-                await postJSON(null, '/api/panel/settings', { domain, ssl_cert_name: null }, null, null);
-                // 2) Выпуск Let's Encrypt (живой лог).
-                await issueSslForDomain(domain, logWindow);
-                sslCertName = domain;
-            } catch (err) {
-                alert(`Не удалось выпустить SSL: ${err.message}\nДомен сохранён по HTTP — можно повторить выпуск позже.`);
-                invalidateCache('panelSettings', 'certs'); renderFirstAccessBanner(domain);
-                btn.disabled = false; return;
-            }
+                await postJSON(null, '/api/pending-actions/panel-ssl', { domain });
+            } catch (err) { btn.disabled = false; return; }  // ошибка уже показана
             btn.disabled = false;
+            dnsStatus.innerHTML = '<span style="color:var(--success)">Задача создана — выпуск идёт в фоне.</span>';
+            invalidateCache('panelSettings', 'certs'); renderFirstAccessBanner(domain);
+            openTaskCenter();
+            tcToast('Выпуск SSL для панели запущен в фоне. Домен и сертификат применятся автоматически.');
+            return;
         }
 
         await postJSON(panelForm, '/api/panel/settings', { domain, ssl_cert_name: sslCertName }, "Настройки панели применены! Nginx перезагружается...", () => {
@@ -1370,45 +1361,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = { domain: form.elements.domain.value, ssl_cert_name: form.elements.ssl_cert_name.value || null };
         await postJSON(form, `/api/applications/${appId}`, data, "Приложение обновлено! Nginx перезагружается...", () => { hideModal('editApplicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); }, 'PATCH');
     }
-    // Выпуск SSL для уже опубликованного приложения: DNS-чек → issue (WS-лог) → PATCH привязки.
+    // Выпуск SSL для уже опубликованного приложения — в ФОН (Ночь 10): задача сама
+    // дождётся DNS, выпустит сертификат и привяжет его. Страницу можно закрыть.
     async function handleIssueAppSsl(appId, domain) {
-        if (!confirm(`Выпустить Let's Encrypt сертификат для "${domain}"?\n\nУбедитесь, что A-запись домена указывает на этот сервер.`)) return;
+        if (!confirm(`Выпустить Let's Encrypt сертификат для "${domain}" в фоне?\n\nЗадача сама дождётся распространения DNS и выпустит сертификат — можно закрыть страницу и следить в центре задач.`)) return;
         try {
-            await issueSslForDomain(domain);
-            await postJSON(null, `/api/applications/${appId}`, { ssl_cert_name: domain }, "SSL выпущен и привязан!", () => { invalidateCache('applications', 'certs'); loadAndDisplayApplications(); }, 'PATCH');
+            await postJSON(null, '/api/pending-actions/issue-ssl', { domain, app_id: appId });
+            openTaskCenter();
+            tcToast('Выпуск SSL запущен в фоне. Следите за ходом в центре задач.');
         } catch (err) { /* сообщение уже показано */ }
-    }
-    // --- Ожидания доменного пикера (ADR-057) ---
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-    // Ждёт исполнения заявки на A-запись реконсайлером ЛК (проход ~45 c). Живой статус в statusEl.
-    async function waitForDnsRequestDone(requestId, statusEl, timeoutMs = 4 * 60 * 1000) {
-        const started = Date.now();
-        while (Date.now() - started < timeoutMs) {
-            const resp = await fetch('/api/dns/requests', { headers: { 'Authorization': `Bearer ${getToken()}` } });
-            if (resp.ok) {
-                const req = (await resp.json()).find(r => r.id === requestId);
-                if (req && req.status === 'created') { statusEl.innerHTML = '<span style="color:var(--success)">✅ A-запись создана.</span>'; return; }
-                if (req && req.status === 'error') throw new Error(req.note || 'Контрол-плейн не смог создать A-запись.');
-            }
-            const waited = Math.round((Date.now() - started) / 1000);
-            statusEl.textContent = `⏳ Создаём A-запись через контрол-плейн… (${waited} c; обычно до минуты)`;
-            await sleep(5000);
-        }
-        throw new Error('A-запись не создана за отведённое время. Проверьте подключение Рег.ру в ЛК и повторите.');
-    }
-    // Ждёт, пока локальный DNS-чек деплоера подтвердит A-запись (перед выпуском SSL).
-    async function waitForDnsMatch(domain, statusEl, timeoutMs = 5 * 60 * 1000) {
-        const started = Date.now();
-        while (Date.now() - started < timeoutMs) {
-            try {
-                const d = await checkDns(domain);
-                if (d.matches) { statusEl.innerHTML = '<span style="color:var(--success)">DNS подтверждён.</span>'; return d; }
-            } catch (err) { /* транзиентная ошибка чека — повторим */ }
-            const waited = Math.round((Date.now() - started) / 1000);
-            statusEl.textContent = `⏳ Ждём распространения DNS для ${domain}… (${waited} c)`;
-            await sleep(5000);
-        }
-        throw new Error('DNS не подтвердился за отведённое время. Публикуйте без SSL и выпустите его позже кнопкой в строке.');
     }
     async function handleCreateApplication(e) {
         e.preventDefault();
@@ -1419,64 +1380,41 @@ document.addEventListener('DOMContentLoaded', () => {
         const domain = currentAppDomain();
         if (!domain) { alert('Укажите домен (или субдомен и зону).'); return; }
         const serviceId = parseInt(raw.service_id);
-        // Имя пусто → генерируем из имени сервиса (бэкенд требует имя для приложения).
-        let name = (raw.name || '').trim();
-        if (!name) {
-            const srv = (CACHE.services || []).find(s => s.id === serviceId);
-            name = uniqueName((srv && srv.name) || 'app', (CACHE.applications || []).map(a => a.name));
-        }
-        const data = { name, domain, service_id: serviceId, ssl_cert_name: null };
+        const name = (raw.name || '').trim();
 
-        // Пикер «из готового»: заявка на A-запись → её исполняет реконсайлер ЛК (~1 мин).
-        if (domainMode === 'picker') {
-            const statusEl = document.getElementById('appDnsRequestStatus');
+        // Долгий путь (ждать распространения DNS до суток / выпускать SSL) уводим в ФОН —
+        // модалку не держим (Ночь 10, инвариант №7). Сервер сам доведёт до HTTPS.
+        const needsAsync = (domainMode === 'picker') || (mode === 'issue');
+        if (needsAsync) {
+            const body = {
+                service_id: serviceId, domain, name: name || null, ssl_mode: mode,
+                existing_cert: mode === 'existing' ? (raw.ssl_cert_name || null) : null,
+            };
+            if (domainMode === 'picker') {
+                body.zone = document.getElementById('appZoneSelect').value;
+                body.subdomain = document.getElementById('appSubdomainInput').value.trim();
+            }
             const submitBtn = form.querySelector('button[type="submit"]');
             submitBtn.disabled = true;
             try {
-                const req = await postJSON(null, '/api/dns/requests', {
-                    zone: document.getElementById('appZoneSelect').value,
-                    subdomain: document.getElementById('appSubdomainInput').value.trim(),
-                });
-                await waitForDnsRequestDone(req.id, statusEl);
-                // Для SSL нужен резолвящийся DNS; без SSL публикуем сразу (запись догонит).
-                if (mode === 'issue') await waitForDnsMatch(domain, statusEl);
-            } catch (err) {
-                statusEl.innerHTML = `<span style="color:var(--danger)">${escapeHTML(err.message)}</span>`;
-                submitBtn.disabled = false;
-                return;
-            }
+                await postJSON(null, '/api/pending-actions/publish', body);
+            } catch (err) { submitBtn.disabled = false; return; }  // ошибка уже показана
             submitBtn.disabled = false;
+            hideModal('applicationModal');
+            invalidateCache('applications'); loadAndDisplayApplications();
+            openTaskCenter();
+            tcToast('Публикация запущена в фоне. Следите за ходом в центре задач (кнопка справа внизу) — можно закрыть страницу.');
+            return;
         }
 
-        if (mode === 'existing') {
-            data.ssl_cert_name = raw.ssl_cert_name || null;
-        } else if (mode === 'issue') {
-            // Авто-SSL: DNS-чек → выпуск (WS-лог) → публикация с готовым сертификатом.
-            const btn = form.querySelector('button[type="submit"]');
-            const logWindow = document.getElementById('appSslLogWindow');
-            const dnsStatus = document.getElementById('appDnsStatus');
-            btn.disabled = true;
-            try {
-                dnsStatus.textContent = 'Проверка DNS...';
-                const dns = await checkDns(domain);
-                if (!dns.matches) {
-                    dnsStatus.innerHTML = `<span style="color:var(--danger)">A-запись не указывает на сервер (сервер: ${dns.server_ip || 'N/A'}, домен: ${dns.domain_ip || 'N/A'}). Выпуск невозможен.</span>`;
-                    btn.disabled = false;
-                    return;
-                }
-                dnsStatus.innerHTML = dns.warning
-                    ? `<span style="color:var(--warning,#e0a000)">⚠️ ${escapeHTML(dns.warning)} Пробую выпустить…</span>`
-                    : `<span style="color:var(--success)">DNS OK. Выпускаем сертификат...</span>`;
-                await issueSslForDomain(domain, logWindow);
-                data.ssl_cert_name = domain;
-            } catch (err) {
-                alert(`Не удалось выпустить SSL: ${err.message}. Приложение не опубликовано.`);
-                btn.disabled = false;
-                return;
-            }
-            btn.disabled = false;
+        // Быстрый путь (без SSL или готовый сертификат на введённом домене) — как раньше,
+        // синхронно: тут ждать нечего.
+        let appName = name;
+        if (!appName) {
+            const srv = (CACHE.services || []).find(s => s.id === serviceId);
+            appName = uniqueName((srv && srv.name) || 'app', (CACHE.applications || []).map(a => a.name));
         }
-
+        const data = { name: appName, domain, service_id: serviceId, ssl_cert_name: mode === 'existing' ? (raw.ssl_cert_name || null) : null };
         await postJSON(form, '/api/applications', data, `Приложение опубликовано! Доступно: ${data.ssl_cert_name ? 'https' : 'http'}://${domain}`, () => { hideModal('applicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); });
     }
     async function loadAndDisplayCerts() { const tableBody = document.querySelector('#certsTable tbody'); try { const certs = await fetchData('certs', '/api/ssl/certificates'); if (certs.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-secondary);">Сертификаты не найдены.</td></tr>`; return; } tableBody.innerHTML = certs.map(cert => `<tr><td><span class="mono">${escapeHTML(cert.name)}</span></td><td>${escapeHTML(cert.subject)}</td><td>${new Date(cert.not_after).toLocaleDateString()}</td><td><button class="icon-btn danger" data-cert-name="${escapeHTML(cert.name)}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-cert-name]').forEach(btn => { btn.onclick = () => handleCertDelete(btn.dataset.certName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="4" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
@@ -1724,8 +1662,134 @@ document.addEventListener('DOMContentLoaded', () => {
     const POLL_MS = 4000;
     const startPolling = () => { stopPolling(); pollTimer = setInterval(pollTick, POLL_MS); };
     const stopPolling = () => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; };
+
+    // --- Центр фоновых задач (Ночь 10, ADR-069) ---
+    // Долгие операции (публикация с DNS-ожиданием, выпуск SSL) идут в фоне на сервере
+    // (модель PendingAction), а UI лишь показывает их статус и уведомляет о результате.
+    let taskCenterOpen = false;
+    let taskCenterKnown = {};   // id -> последний виденный статус (для тостов-уведомлений)
+    const TASK_STATUS_RU = { pending: 'в очереди', running: 'выполняется', done: 'готово', error: 'ошибка' };
+
+    function initTaskCenter() {
+        const tc = document.getElementById('taskCenter');
+        if (!tc) return;
+        tc.hidden = false;
+        taskCenterKnown = {};  // на новом входе не тостим исторические задачи (заполнится молча)
+        document.getElementById('taskCenterToggle').onclick = () => {
+            taskCenterOpen = !taskCenterOpen;
+            document.getElementById('taskCenterPanel').hidden = !taskCenterOpen;
+            if (taskCenterOpen) refreshTaskCenter();
+        };
+        document.getElementById('taskCenterClose').onclick = () => {
+            taskCenterOpen = false;
+            document.getElementById('taskCenterPanel').hidden = true;
+        };
+        refreshTaskCenter();
+    }
+    function teardownTaskCenter() {
+        const tc = document.getElementById('taskCenter');
+        if (tc) tc.hidden = true;
+        taskCenterOpen = false;
+        taskCenterKnown = {};
+        const panel = document.getElementById('taskCenterPanel');
+        if (panel) panel.hidden = true;
+    }
+    function openTaskCenter() {
+        const panel = document.getElementById('taskCenterPanel');
+        if (!panel) return;
+        taskCenterOpen = true;
+        panel.hidden = false;
+        refreshTaskCenter();
+    }
+    async function refreshTaskCenter() {
+        if (!getToken()) return;
+        let actions;
+        try {
+            const r = await fetch('/api/pending-actions', { headers: { 'Authorization': `Bearer ${getToken()}` } });
+            if (!r.ok) return;
+            actions = await r.json();
+        } catch (_) { return; }
+        renderTaskCenter(actions);
+        notifyTaskChanges(actions);
+    }
+    const taskIsActive = a => a.status === 'pending' || a.status === 'running';
+    function renderTaskCenter(actions) {
+        const badge = document.getElementById('taskCenterBadge');
+        const toggle = document.getElementById('taskCenterToggle');
+        const active = actions.filter(taskIsActive).length;
+        if (badge) { badge.hidden = actions.length === 0; badge.textContent = String(active || actions.length); }
+        if (toggle) toggle.classList.toggle('busy', active > 0);
+        if (!taskCenterOpen) return;  // тело перерисовываем только когда панель открыта
+        const list = document.getElementById('taskCenterList');
+        if (!list) return;
+        if (actions.length === 0) {
+            list.innerHTML = `<div class="task-center-empty">Фоновых задач нет.<br>Долгие операции (публикация, выпуск SSL) появятся здесь и доведутся до конца сами.</div>`;
+            return;
+        }
+        // Сохраняем, какие журналы были раскрыты, чтобы перерисовка их не схлопнула.
+        const openLogs = new Set([...list.querySelectorAll('details[data-log-id]')].filter(d => d.open).map(d => d.dataset.logId));
+        list.innerHTML = actions.map(a => taskItemHTML(a, openLogs.has(String(a.id)))).join('');
+        list.querySelectorAll('[data-retry]').forEach(b => b.onclick = () => retryTask(b.dataset.retry));
+        list.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = () => dismissTask(b.dataset.dismiss));
+    }
+    function taskResultHTML(a) {
+        if (!a.result) return '';
+        const body = (a.status === 'done' && /^https?:\/\//.test(a.result))
+            ? `<a href="${escapeHTML(a.result)}" target="_blank" rel="noopener">${escapeHTML(a.result)}</a>`
+            : escapeHTML(a.result);
+        return `<div class="task-item-result">${body}</div>`;
+    }
+    function taskItemHTML(a, logOpen) {
+        const icon = taskIsActive(a)
+            ? '<span class="task-spinner"></span>'
+            : `<span class="material-symbols-outlined" style="color:var(--${a.status === 'done' ? 'success' : 'danger'})">${a.status === 'done' ? 'check_circle' : 'error'}</span>`;
+        const btns = [];
+        if (a.status === 'error') btns.push(`<button class="btn-icon-label" data-retry="${a.id}"><span class="material-symbols-outlined">refresh</span>Повторить</button>`);
+        if (!taskIsActive(a)) btns.push(`<button class="btn-icon-label" data-dismiss="${a.id}"><span class="material-symbols-outlined">close</span>Убрать</button>`);
+        const log = a.log ? `<details class="task-item-log" data-log-id="${a.id}"${logOpen ? ' open' : ''}><summary>Журнал</summary><pre>${escapeHTML(a.log)}</pre></details>` : '';
+        return `<div class="task-item">
+            <div class="task-item-head">${icon}<span class="task-item-title" title="${escapeHTML(a.title || '')}">${escapeHTML(a.title || a.type)}</span><span class="task-item-status ${a.status}">${TASK_STATUS_RU[a.status] || a.status}</span></div>
+            ${taskResultHTML(a)}
+            ${log}
+            ${btns.length ? `<div class="task-item-actions">${btns.join('')}</div>` : ''}
+        </div>`;
+    }
+    async function retryTask(id) {
+        try { await fetch(`/api/pending-actions/${id}/retry`, { method: 'POST', headers: { 'Authorization': `Bearer ${getToken()}` } }); } catch (_) { /* тихо */ }
+        refreshTaskCenter();
+    }
+    async function dismissTask(id) {
+        try { await fetch(`/api/pending-actions/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${getToken()}` } }); } catch (_) { /* тихо */ }
+        refreshTaskCenter();
+    }
+    // Тост при смене статуса задачи на завершённый — «уведомление о результате» (DoD Ночи 10).
+    function notifyTaskChanges(actions) {
+        const firstLoad = Object.keys(taskCenterKnown).length === 0;
+        if (!firstLoad) {
+            actions.forEach(a => {
+                const prev = taskCenterKnown[a.id];
+                if (prev && prev !== a.status && (a.status === 'done' || a.status === 'error')) {
+                    const ok = a.status === 'done';
+                    tcToast(`${a.title || 'Задача'}: ${a.result || (ok ? 'готово' : 'ошибка')}`, ok ? 'success' : 'error');
+                    if (a.status === 'done') { invalidateCache('applications', 'certs'); }
+                }
+            });
+        }
+        taskCenterKnown = Object.fromEntries(actions.map(a => [a.id, a.status]));
+    }
+    function tcToast(msg, kind) {
+        let wrap = document.getElementById('tcToastWrap');
+        if (!wrap) { wrap = document.createElement('div'); wrap.id = 'tcToastWrap'; wrap.className = 'tc-toast-wrap'; document.body.appendChild(wrap); }
+        const el = document.createElement('div');
+        el.className = `tc-toast ${kind || ''}`;
+        el.textContent = msg;
+        wrap.appendChild(el);
+        setTimeout(() => { el.style.transition = 'opacity .3s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 6000);
+    }
+
     async function pollTick() {
         if (document.hidden || !getToken()) return;
+        refreshTaskCenter();  // фоновые задачи обновляем на любой странице (бейдж/уведомления)
         if (document.querySelector('.modal-backdrop.show')) return;  // не дёргаем во время модалок
         const page = window.location.hash.replace('#', '') || 'services';
         const onServices = currentStage === 'services' && document.getElementById('servicesContainer');

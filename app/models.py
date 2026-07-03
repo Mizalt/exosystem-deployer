@@ -154,3 +154,33 @@ class DnsRecordRequest(Base):
     note = Column(Text, nullable=True)           # human-заметка исполнителя (ЛК)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# --- Фоновые задачи панели (Ночь 10, ADR-069; инвариант №7 в 18_RELEASE_PLAN) ---
+
+class PendingAction(Base):
+    """Долгая операция, вынесенная из блокирующей модалки в фон.
+
+    Периодический чекер (`app/services/pending_actions.py`) двигает задачу по стадиям
+    (ждать распространения DNS → опубликовать → выпустить SSL), переживая перезагрузку
+    страницы и закрытие вкладки: состояние живёт в БД, а не в JS. UI показывает эти
+    задачи в «центре задач» и уведомляет о результате. Первые сценарии:
+      • `publish_on_dns` — опубликовать сервис + авто-SSL (главная боль: DNS до суток);
+      • `issue_ssl`      — выпустить/привязать сертификат к домену (опц. к приложению);
+      • `panel_ssl`      — выпустить сертификат для домена самой панели.
+    Расширяемо (триггеры/действия) — фаза 1 «Программатора сценариев» (Идея 3, 08_IDEAS).
+    """
+    __tablename__ = "pending_actions"
+    id = Column(Integer, primary_key=True, index=True)
+    type = Column(String, nullable=False)                       # publish_on_dns|issue_ssl|panel_ssl
+    status = Column(String, default="pending", nullable=False)  # pending|running|done|error
+    title = Column(String, nullable=True)                       # человекочитаемый заголовок для UI
+    params = Column(Text, nullable=True)                        # JSON: домен, стадия, app_id и пр.
+    log = Column(Text, nullable=True)                           # накопленный лог прогресса
+    result = Column(Text, nullable=True)                        # итоговое сообщение (успех/ошибка)
+    attempts = Column(Integer, default=0, nullable=False)       # число проб (DNS/SSL) — для бэкоффа
+    # Когда чекер должен вернуться к задаче (UTC-naive; None = как можно скорее). Так
+    # ожидание DNS/SSL не крутится в цикле, а планируется на будущее (бэкофф).
+    next_check_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

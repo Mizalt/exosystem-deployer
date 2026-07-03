@@ -253,6 +253,21 @@
         <option value="mysql:8"></option>
     </datalist>
 
+    <!-- Центр фоновых задач (Ночь 10, ADR-069): долгие операции не держат UI (инвариант №7) -->
+    <div id="taskCenter" class="task-center" hidden>
+        <button type="button" id="taskCenterToggle" class="task-center-toggle" title="Фоновые задачи" aria-label="Фоновые задачи">
+            <span class="material-symbols-outlined">pending_actions</span>
+            <span class="task-center-badge" id="taskCenterBadge" hidden>0</span>
+        </button>
+        <div class="task-center-panel" id="taskCenterPanel" hidden>
+            <div class="task-center-head">
+                <h3><span class="material-symbols-outlined">checklist</span>Фоновые задачи</h3>
+                <button type="button" class="icon-btn" id="taskCenterClose" aria-label="Закрыть"><span class="material-symbols-outlined">close</span></button>
+            </div>
+            <div class="task-center-list" id="taskCenterList"></div>
+        </div>
+    </div>
+
     <script src="/static/js/app.js" defer></script>
 </body>
 </html>

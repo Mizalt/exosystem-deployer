@@ -550,3 +550,39 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .field-row { display: flex; gap: 12px; align-items: flex-start; }
 .field-row .form-group { flex: 1 1 auto; min-width: 0; }
 .field-row .field-narrow { flex: 0 0 110px; }
+
+/* --- Центр фоновых задач (Ночь 10, ADR-069): плавающая кнопка + выезжающая панель --- */
+.task-center { position: fixed; right: 24px; bottom: 24px; z-index: 900; }
+.task-center-toggle { position: relative; width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-surface); color: var(--accent); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(0,0,0,0.45); transition: background 0.2s; }
+.task-center-toggle:hover { background: var(--bg-hover); }
+.task-center-toggle.busy { animation: tc-pulse 1.8s ease-in-out infinite; }
+@keyframes tc-pulse { 0%,100% { box-shadow: 0 8px 24px rgba(0,0,0,0.45); } 50% { box-shadow: 0 0 0 6px rgba(168,199,250,0.18), 0 8px 24px rgba(0,0,0,0.45); } }
+.task-center-badge { position: absolute; top: -4px; right: -4px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: #0a1a33; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.task-center-panel { position: absolute; right: 0; bottom: 64px; width: 380px; max-width: calc(100vw - 32px); max-height: 70vh; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); display: flex; flex-direction: column; overflow: hidden; }
+.task-center-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 14px 18px; border-bottom: 1px solid var(--border); }
+.task-center-head h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
+.task-center-list { padding: 10px; overflow-y: auto; }
+.task-center-empty { color: var(--text-secondary); text-align: center; padding: 24px 12px; font-size: 13px; line-height: 1.5; }
+.task-item { background: var(--bg-main); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+.task-item:last-child { margin-bottom: 0; }
+.task-item-head { display: flex; align-items: center; gap: 10px; }
+.task-item-title { flex: 1; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-item-status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.task-item-status.pending, .task-item-status.running { color: var(--accent); background: rgba(168,199,250,0.12); }
+.task-item-status.done { color: var(--success); background: rgba(109,213,140,0.12); }
+.task-item-status.error { color: var(--danger); background: rgba(242,139,130,0.12); }
+.task-item-result { font-size: 13px; color: var(--text-secondary); margin-top: 8px; word-break: break-word; }
+.task-item-result a { color: var(--accent); }
+.task-item-actions { display: flex; gap: 8px; margin-top: 10px; }
+.task-item-actions .btn-icon-label { padding: 6px 10px; font-size: 12px; }
+.task-item-log { margin-top: 8px; }
+.task-item-log summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+.task-item-log pre { margin-top: 6px; background: #000; border-radius: 10px; padding: 10px; font-family: 'Roboto Mono', monospace; font-size: 11px; color: #bbb; max-height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+.task-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: tc-spin 0.9s linear infinite; flex-shrink: 0; }
+@keyframes tc-spin { to { transform: rotate(360deg); } }
+/* Мини-тост «уведомление о результате задачи» */
+.tc-toast-wrap { position: fixed; right: 24px; bottom: 88px; z-index: 950; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.tc-toast { background: var(--bg-surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 12px; padding: 12px 16px; max-width: 340px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); font-size: 13px; animation: tc-slide 0.25s ease; }
+.tc-toast.success { border-left-color: var(--success); }
+.tc-toast.error { border-left-color: var(--danger); }
+@keyframes tc-slide { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
