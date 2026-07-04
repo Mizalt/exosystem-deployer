@@ -225,6 +225,13 @@ class PendingActionOut(BaseModel):
     log: Optional[str] = None
     result: Optional[str] = None
     created_at: datetime
+    # Ночь 14 (ADR-082): текущая стадия активной задачи + честный ETA. Аддитивно
+    # (старые клиенты игнорируют); считает список-роут через describe_stage.
+    stage: Optional[str] = None            # publish|dns_wait|ssl_issue|self_update
+    stage_label: Optional[str] = None      # человекочитаемая стадия
+    eta_seconds: Optional[int] = None      # оценка по средним прошлых прогонов
+    unpredictable: bool = False            # фаза без честного ETA (DNS) → UI показывает вилку
+    hint: Optional[str] = None             # текст вилки («от минут до суток…»)
 
     model_config = ConfigDict(from_attributes=True)
 

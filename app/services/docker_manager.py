@@ -129,46 +129,44 @@ def build_image_if_needed(zip_path: Path, image_cache_key: str = None, build_con
         # неудачной сборке: иначе легаси-билдер оставляет контейнер упавшего шага,
         # и при повторных попытках они копятся («флуд» остановленных контейнеров).
         print(f"INFO: Building image {image_tag}...")
-        if on_line is not None:
-            _build_image_streaming(build_context, image_tag, on_line)
-        else:
-            try:
-                client.images.build(path=str(build_context), tag=image_tag, rm=True, forcerm=True)
-            except docker.errors.BuildError as e:
-                print(f"ERROR: Docker build failed: {e}")
-                lines = []
-                for chunk in e.build_log:
-                    if 'stream' in chunk:
-                        s = chunk['stream'].rstrip()
-                        if s:
-                            print(s)
-                            lines.append(s)
-                # Поднимаем ошибку с логом сборки, чтобы оркестратор сохранил её на
-                # Deployment и UI показал причину, почему сервис «не запускается».
-                detail = "\n".join(lines[-60:]) if lines else str(e)
-                raise RuntimeError(f"Ошибка сборки образа:\n{detail}")
+        _build_image_streaming(build_context, image_tag, on_line)
 
     return image_tag
 
 
-def _build_image_streaming(build_context: Path, image_tag: str, on_line):
-    """Сборка через low-level Docker API со стримингом лога построчно в `on_line`
-    (живые WS-логи, ADR-023). low-level build НЕ кидает BuildError — ошибку отдаёт
-    как chunk {'error': ...}; ловим её и поднимаем RuntimeError с хвостом лога."""
+def _build_image_streaming(build_context: Path, image_tag: str, on_line=None):
+    """Сборка через low-level Docker API со стримингом лога (ЕДИНСТВЕННЫЙ путь
+    сборки с Ночи 14 — раньше без `on_line` шёл блокирующий build без прогресса).
+
+    Каждый chunk уходит в `build_progress` (ADR-082): реестр отдаёт живую стадию
+    (pull по слоям / шаг сборки) в `/api/services`, pull-события базового образа
+    (раньше игнорировались — долгий pull выглядел зависанием) превращаются в
+    троттленные строки-проценты, а завершение пишет замер OperationMetric.
+    low-level build НЕ кидает BuildError — ошибку отдаёт как chunk {'error': ...};
+    ловим её и поднимаем RuntimeError с хвостом лога."""
+    from app.services import build_progress
+
     log_lines: list[str] = []
     error_text = None
-    for chunk in client.api.build(path=str(build_context), tag=image_tag, rm=True, forcerm=True, decode=True):
-        if 'stream' in chunk:
-            text = chunk['stream'].rstrip()
-            if text:
-                print(text)
-                log_lines.append(text)
-                on_line(text)
-        elif 'error' in chunk:
-            error_text = chunk['error'].rstrip()
-            print(f"ERROR: Docker build failed: {error_text}")
-            log_lines.append(error_text)
-            on_line(error_text)
+    ok = False
+    build_progress.begin(image_tag)
+    try:
+        for chunk in client.api.build(path=str(build_context), tag=image_tag,
+                                      rm=True, forcerm=True, decode=True):
+            if 'error' in chunk:
+                error_text = str(chunk['error']).rstrip()
+                print(f"ERROR: Docker build failed: {error_text}")
+            line = build_progress.feed(image_tag, chunk)
+            if line:
+                if 'error' not in chunk:
+                    print(line)
+                log_lines.append(line)
+                if on_line is not None:
+                    on_line(line)
+        ok = error_text is None
+    finally:
+        # ok=False и при исключении самого стрима (демон оборвал сборку и т.п.).
+        build_progress.finish(image_tag, ok=ok)
     if error_text is not None:
         detail = "\n".join(log_lines[-60:])
         raise RuntimeError(f"Ошибка сборки образа:\n{detail}")

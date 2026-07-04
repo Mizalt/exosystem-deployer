@@ -1,6 +1,6 @@
 # --- app/crud.py ---
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from . import models, schemas
 from . import security
@@ -338,3 +338,48 @@ def delete_pending_action(db: Session, action_id: int) -> models.PendingAction |
         db.delete(action)
         db.commit()
     return action
+
+
+# --- Замеры долгих операций (Ночь 14, ADR-082) ---
+
+# Сколько последних замеров держим НА КАЖДЫЙ вид операции (ретенция: средние
+# для ETA важнее древней истории, таблица не должна расти бесконечно).
+OPERATION_METRICS_KEEP = 400
+
+
+def record_operation_metric(db: Session, *, kind: str, subject: str | None = None,
+                            duration_seconds: float | None = None,
+                            outcome: str = "done",
+                            meta: str | None = None) -> models.OperationMetric:
+    row = models.OperationMetric(kind=kind, subject=subject,
+                                 duration_seconds=duration_seconds,
+                                 outcome=outcome, meta=meta)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    stale_ids = [r[0] for r in db.query(models.OperationMetric.id)
+                 .filter(models.OperationMetric.kind == kind)
+                 .order_by(models.OperationMetric.id.desc())
+                 .offset(OPERATION_METRICS_KEEP).all()]
+    if stale_ids:
+        db.query(models.OperationMetric).filter(
+            models.OperationMetric.id.in_(stale_ids)).delete(synchronize_session=False)
+        db.commit()
+    return row
+
+
+def operation_stats(db: Session) -> dict:
+    """{kind: {avg, samples}} по УСПЕШНЫМ замерам — сырьё для ETA и аналитики."""
+    rows = (db.query(models.OperationMetric.kind,
+                     func.avg(models.OperationMetric.duration_seconds),
+                     func.count(models.OperationMetric.id))
+            .filter(models.OperationMetric.outcome == "done",
+                    models.OperationMetric.duration_seconds.isnot(None))
+            .group_by(models.OperationMetric.kind).all())
+    return {kind: {"avg": round(float(avg), 1), "samples": int(count)}
+            for kind, avg, count in rows if avg is not None}
+
+
+def list_operation_metrics(db: Session, limit: int = 200) -> list[models.OperationMetric]:
+    return (db.query(models.OperationMetric)
+            .order_by(models.OperationMetric.id.desc()).limit(limit).all())

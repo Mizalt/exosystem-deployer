@@ -1,6 +1,6 @@
 # --- ИЗМЕНЕННЫЙ ФАЙЛ: app/models.py ---
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, Float, Integer, String, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
@@ -165,6 +165,27 @@ class DnsRecordRequest(Base):
     note = Column(Text, nullable=True)           # human-заметка исполнителя (ЛК)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# --- Замеры долгих операций (Ночь 14, ADR-082) ---
+
+class OperationMetric(Base):
+    """Замер одной долгой операции ноды — обобщение `ProvisionMetric` ЛК (ADR-066).
+
+    «Всё, что занимает время, должно быть с замерами»: по средним из этой таблицы
+    UI строит ETA (прогресс сборки, центр задач), а супер-админка ЛК — аналитику
+    бутылочных горлышек (зеркало агрегатов через `GET /api/operation-metrics`).
+    Виды (kind, пополняем аддитивно): build | ssl_issue | dns_wait | self_update.
+    Ретенция — в `crud.record_operation_metric` (старые строки подрезаются).
+    """
+    __tablename__ = "operation_metrics"
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String, index=True, nullable=False)      # вид операции
+    subject = Column(String, nullable=True)                # объект (домен, хэш образа)
+    duration_seconds = Column(Float, nullable=True)        # полная длительность
+    outcome = Column(String, default="done", nullable=False)  # done|error
+    meta = Column(Text, nullable=True)                     # JSON-детали (pull_seconds, steps…)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 # --- Фоновые задачи панели (Ночь 10, ADR-069; инвариант №7 в 18_RELEASE_PLAN) ---

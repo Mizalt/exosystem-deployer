@@ -23,7 +23,7 @@ import httpx
 
 from app import config, crud, environment, panel_config, schemas
 from app.database import SessionLocal
-from app.services import docker_manager, nginx_manager
+from app.services import docker_manager, nginx_manager, op_metrics
 from app.services.ssl_service import acme_preflight
 
 # Как часто чекер просыпается (задачи всё равно гейтятся своим next_check_at).
@@ -216,6 +216,10 @@ def _advance_ssl(db, action, params: dict, domain: str,
     matched, detail = dns_matches(domain)
     if not matched:
         if now - params["wait_since"] > DNS_MAX_AGE_SECONDS:
+            # Замер честного провала ожидания (Ночь 14): сколько прождали впустую.
+            op_metrics.record("dns_wait", subject=domain,
+                              duration_seconds=round(now - params["wait_since"], 1),
+                              outcome="error", db=db)
             _fail(action, "DNS так и не начал указывать на сервер (ждали более 36 часов). "
                           "Проверьте A-запись домена и нажмите «Повторить».")
             return
@@ -225,8 +229,21 @@ def _advance_ssl(db, action, params: dict, domain: str,
         _store(action, params)
         return
 
+    if not params.get("dns_confirmed"):
+        # Первое подтверждение DNS — фиксируем стадию (для UI-стадии задачи) и
+        # замер длительности ожидания (сырьё аналитики; ETA по нему не строим —
+        # фаза принципиально непредсказуема, UI показывает вилку).
+        params["dns_confirmed"] = True
+        _store(action, params)
+        op_metrics.record("dns_wait", subject=domain,
+                          duration_seconds=round(now - params["wait_since"], 1), db=db)
+
     _append_log(action, f"DNS подтверждён ({detail}). Выпускаю сертификат…")
+    ssl_started = time.time()
     ok, ssl_log = issue_certificate(domain)
+    op_metrics.record("ssl_issue", subject=domain,
+                      duration_seconds=round(time.time() - ssl_started, 1),
+                      outcome="done" if ok else "error", db=db)
     _append_log(action, ssl_log)
     if ok:
         if bind_app_id:
@@ -308,6 +325,7 @@ def _handle_self_update(db, action) -> None:
             _fail(action, str(e))
             return
         params["started"] = True
+        params["started_ts"] = time.time()  # для замера self_update и ETA (Ночь 14)
         _store(action, params)
         _append_log(action, "Updater запущен: build-first, при провале health — авто-откат. "
                             "Панель может быть недоступна несколько секунд в момент переключения.")
@@ -331,18 +349,32 @@ def _handle_self_update(db, action) -> None:
     if logs:
         _append_log(action, logs)
     self_update.cleanup_updater()
+
+    def _measure(outcome: str) -> None:
+        """Замер полного самообновления (Ночь 14) — от запуска updater'а до финала."""
+        started = params.get("started_ts")
+        if started:
+            op_metrics.record("self_update", subject=(params.get("ref") or "latest")[:40],
+                              duration_seconds=round(time.time() - started, 1),
+                              outcome=outcome, db=db)
+
     if code == 0:
         if "ALREADY_UP_TO_DATE" in logs:
+            # Без замера: «уже актуально» — не обновление, испортило бы среднее ETA.
             _done(action, "Уже актуальная версия — обновление не потребовалось.")
             return
         cur = (self_update.read_update_state().get("current_ref") or "")[:12]
+        _measure("done")
         _done(action, f"Обновление применено{' (' + cur + ')' if cur else ''}.")
     elif code == 3:
+        _measure("error")
         _fail(action, "Сборка новой версии провалилась — работающая версия не тронута (build-first).")
     elif code == 42:
+        _measure("error")
         _fail(action, "Новая версия не прошла проверку здоровья — выполнен автоматический "
                       "откат на прежнюю версию.")
     else:
+        _measure("error")
         _fail(action, f"Updater завершился с кодом {code} — подробности в журнале выше.")
 
 
@@ -352,6 +384,57 @@ HANDLERS = {
     "panel_ssl": _handle_panel_ssl,
     "self_update": _handle_self_update,
 }
+
+
+# --- Стадия активной задачи для UI (Ночь 14, ADR-082) ---------------------------
+
+STAGE_LABELS = {
+    "publish": "Публикация приложения",
+    "dns_wait": "Ожидание распространения DNS",
+    "ssl_issue": "Выпуск сертификата",
+    "self_update": "Обновление деплоера",
+}
+
+# Честная вилка для непредсказуемой фазы (провайдер DNS вне нашего контроля) —
+# UI показывает её ВМЕСТО числового ETA (паттерн dns_unpredictable ADR-066).
+DNS_HINT = "от минут до суток — зависит от DNS-провайдера"
+
+
+def describe_stage(db, action, stats: dict | None = None) -> dict | None:
+    """Текущая стадия активной задачи + ETA по средним прошлых прогонов.
+
+    Единый источник для центра задач панели и зеркала задач в ЛК: семантика
+    `params` (wait_since/dns_confirmed/app_id/started_ts) живёт здесь же, где
+    её пишут обработчики. None — задача завершена или тип без стадий.
+    """
+    if action.status not in ("pending", "running"):
+        return None
+    params = _load(action)
+
+    if action.type == "self_update":
+        eta = None
+        avg = op_metrics.avg_seconds(db, "self_update", stats=stats)
+        if avg:
+            elapsed = time.time() - params["started_ts"] if params.get("started_ts") else 0
+            eta = max(round(avg - elapsed), 15)
+        return {"stage": "self_update", "stage_label": STAGE_LABELS["self_update"],
+                "eta_seconds": eta, "unpredictable": False}
+
+    if action.type in ("publish_on_dns", "issue_ssl", "panel_ssl"):
+        if action.type == "publish_on_dns" and not params.get("app_id"):
+            stage = "publish"  # мгновенная стадия до первой пробы чекера
+        elif not params.get("dns_confirmed"):
+            stage = "dns_wait"
+        else:
+            stage = "ssl_issue"
+        out = {"stage": stage, "stage_label": STAGE_LABELS[stage],
+               "eta_seconds": None, "unpredictable": stage == "dns_wait"}
+        if stage == "dns_wait":
+            out["hint"] = DNS_HINT
+        elif stage == "ssl_issue":
+            out["eta_seconds"] = op_metrics.avg_seconds(db, "ssl_issue", stats=stats)
+        return out
+    return None
 
 
 # --- Проход чекера и фоновый цикл ---
