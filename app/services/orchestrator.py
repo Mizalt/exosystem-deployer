@@ -218,6 +218,10 @@ def reconcile(db: Session):
                     deployment.last_build_log = str(e)[:8000]
                     deployment.build_attempts = (deployment.build_attempts or 0) + 1
                     db.commit()
+                    # Диск-гигиена (ADR-078): упавшая сборка тоже оставляет dangling-стадии
+                    # (многостадийные Dockerfile). Чистим сразу, иначе серия ретраев забьёт
+                    # диск в ноль (живой инцидент: диск 100% → нода в thrash).
+                    _prune_dangling_safe()
                     break  # не долбим сборку в этом цикле; backoff остановит повторы
 
                 if container_id:
@@ -244,6 +248,10 @@ def reconcile(db: Session):
                         deployment.last_build_log = None
                         deployment.build_attempts = 0
                     db.commit()
+                    # Диск-гигиена (ADR-078): успешная сборка многостадийного образа
+                    # оставила dangling-стадии — убираем сразу, чтобы серия деплоев не
+                    # копила их до заполнения диска.
+                    _prune_dangling_safe()
                     # reload nginx при scale НЕ нужен: в сетевой модели deployer-net
                     # (ADR-005) nginx-конфиг приложения указывает на деплоер
                     # (/api/proxy/<app>), а выбор живой реплики делает proxy.py —
@@ -266,6 +274,14 @@ def _prune_unused_images_safe(db: Session) -> None:
         prune_unused_images(db)
     except Exception as e:
         print(f"[ORCHESTRATOR] image prune failed: {e}")
+
+
+def _prune_dangling_safe() -> None:
+    """Уборка dangling-образов/кэша после сборки (ADR-078), изолированная от цикла."""
+    try:
+        docker_manager.prune_dangling_images()
+    except Exception as e:  # noqa: BLE001 — диск-гигиена не должна ронять деплой
+        print(f"[ORCHESTRATOR] dangling prune failed: {e}")
 
 
 async def run_orchestrator_loop():
