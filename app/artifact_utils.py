@@ -8,7 +8,49 @@ import re
 import tarfile
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+
+
+class UnsafeArchiveError(ValueError):
+    """Архив содержит путь с обходом каталога (zip-slip) — распаковка отклонена (V-03)."""
+
+
+def _is_safe_member(name: str) -> bool:
+    """True, если имя записи в архиве не выводит за пределы каталога распаковки.
+
+    Отсекает абсолютные пути (`/etc/...`, `C:\\...`) и любой компонент `..`.
+    Пустые имена/`.`-компоненты безвредны (остаются внутри).
+    """
+    if not name:
+        return True
+    norm = name.replace("\\", "/")
+    if norm.startswith("/"):
+        return False
+    # Windows-абсолютные (диск/UNC) — на всякий случай, хоть архивы обычно POSIX.
+    if len(norm) >= 2 and norm[1] == ":":
+        return False
+    return ".." not in norm.split("/")
+
+
+def safe_extract_zip(zf: zipfile.ZipFile, dest_dir) -> None:
+    """Безопасная замена `ZipFile.extractall` (анти zip-slip, V-03).
+
+    Проверяет КАЖДУЮ запись: путь после нормализации должен остаться внутри
+    `dest_dir`. Любой обход (`../`, абсолютный путь) → `UnsafeArchiveError` на весь
+    архив (fail-closed: лучше отклонить артефакт целиком, чем частично распаковать).
+    Симлинки не создаются: `zipfile` записывает их как обычные файлы, поэтому
+    достаточно проверки имён.
+    """
+    dest = Path(dest_dir).resolve()
+    for member in zf.infolist():
+        name = member.filename
+        if not _is_safe_member(name):
+            raise UnsafeArchiveError(f"небезопасный путь в архиве: {name!r}")
+        target = (dest / name.replace("\\", "/")).resolve()
+        if target != dest and dest not in target.parents:
+            raise UnsafeArchiveError(f"путь выходит за пределы каталога распаковки: {name!r}")
+    zf.extractall(dest)
 
 # Имена файлов в архиве, из которых пытаемся вытащить версию/описание.
 _VERSION_FILES = ("version", "version.txt")
@@ -90,6 +132,10 @@ def tarball_to_zip(tar_bytes: bytes) -> bytes:
             # Срезаем первый компонент пути (верхний каталог GitHub-архива).
             parts = member.name.split("/", 1)
             if len(parts) < 2 or not parts[1]:
+                continue
+            # Анти tar-slip (V-03): отбрасываем записи с обходом каталога. GitHub такого
+            # не присылает, но архив — внешний вход, поэтому не доверяем именам.
+            if not _is_safe_member(parts[1]):
                 continue
             extracted = tar.extractfile(member)
             if extracted is None:

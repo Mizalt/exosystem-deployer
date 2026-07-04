@@ -35,3 +35,19 @@ def test_panel_response_has_security_headers():
     assert r.headers["X-Content-Type-Options"] == "nosniff"
     assert r.headers["Referrer-Policy"] == "no-referrer"
     assert "Content-Security-Policy" in r.headers
+
+
+# --- V-10: HSTS ------------------------------------------------------------- #
+
+def test_hsts_header_present():
+    val = security_headers.SECURITY_HEADERS.get("Strict-Transport-Security")
+    assert val and "max-age=" in val
+    # includeSubDomains осознанно НЕ ставим (субдомен-приложения — своя политика).
+    assert "includeSubDomains" not in val
+
+
+def test_panel_response_has_hsts():
+    import main
+    client = TestClient(main.app)
+    r = client.get("/")
+    assert "Strict-Transport-Security" in r.headers

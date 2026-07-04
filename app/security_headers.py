@@ -25,11 +25,20 @@ CSP = "; ".join([
     "frame-ancestors 'none'",
 ])
 
+# HSTS (V-10): после первого визита по HTTPS браузер запрещает downgrade на HTTP
+# (анти SSL-strip). Заголовок, полученный по обычному HTTP, браузеры игнорируют по
+# спецификации — поэтому его безопасно слать всегда, доступ по IP/HTTP до выпуска
+# SSL не ломается. `includeSubDomains`/`preload` НЕ ставим осознанно: приложения
+# пользователя живут на субдоменах домена панели и получают собственный SSL/политику
+# отдельно — не форсируем HTTPS на них с уровня панели.
+HSTS = "max-age=31536000"  # 1 год
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": CSP,
+    "Strict-Transport-Security": HSTS,
 }
 
 # Префиксы путей, для которых заголовки панели НЕ применяем.

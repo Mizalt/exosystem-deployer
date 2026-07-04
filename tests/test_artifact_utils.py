@@ -77,3 +77,59 @@ def test_tarball_to_zip_strips_top_dir_and_preserves_content():
         assert zf.read("app/main.py").decode() == "print('hi')"
     # inspect_zip работает на полученном из tarball ZIP (сквозная проверка импорта).
     assert artifact_utils.inspect_zip(zip_bytes)["version"] == "v9.9.9"
+
+
+# --- V-03: безопасная распаковка (анти zip-slip / tar-slip) ------------------ #
+
+import pytest  # noqa: E402
+
+
+def _zip_bytes(entries: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_is_safe_member():
+    assert artifact_utils._is_safe_member("main.py") is True
+    assert artifact_utils._is_safe_member("sub/dir/app.py") is True
+    assert artifact_utils._is_safe_member("") is True
+    assert artifact_utils._is_safe_member("../evil.py") is False
+    assert artifact_utils._is_safe_member("a/../../b") is False
+    assert artifact_utils._is_safe_member("/etc/passwd") is False
+    assert artifact_utils._is_safe_member("C:/Windows/x") is False
+    assert artifact_utils._is_safe_member(r"dir\..\..\evil") is False
+
+
+def test_safe_extract_zip_normal(tmp_path):
+    data = _zip_bytes({"main.py": "x", "sub/app.py": "y"})
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        artifact_utils.safe_extract_zip(zf, tmp_path)
+    assert (tmp_path / "main.py").read_text() == "x"
+    assert (tmp_path / "sub" / "app.py").read_text() == "y"
+
+
+def test_safe_extract_zip_rejects_traversal(tmp_path):
+    data = _zip_bytes({"../evil.py": "pwn"})
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        with pytest.raises(artifact_utils.UnsafeArchiveError):
+            artifact_utils.safe_extract_zip(zf, tmp_path)
+    assert not (tmp_path.parent / "evil.py").exists()
+
+
+def test_tarball_to_zip_skips_traversal():
+    # Вредоносная запись с обходом каталога отбрасывается, нормальная — сохраняется.
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for arc, content in (("repo-main/ok.py", "good"), ("repo-main/../../evil", "bad")):
+            data = content.encode()
+            info = tarfile.TarInfo(name=arc)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    out = artifact_utils.tarball_to_zip(buf.getvalue())
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+    assert "ok.py" in names
+    assert not any(".." in n for n in names)

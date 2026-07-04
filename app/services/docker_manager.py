@@ -7,6 +7,7 @@ import hashlib
 import socket
 from pathlib import Path
 
+from app import artifact_utils
 from app.environment import get_docker_client
 from app.services.nginx_service import DEPLOYER_NETWORK, ensure_network
 
@@ -99,9 +100,11 @@ def build_image_if_needed(zip_path: Path, image_cache_key: str = None, build_con
     with tempfile.TemporaryDirectory() as tmpdir:
         build_context = Path(tmpdir)
 
-        # 1. Распаковываем архив
+        # 1. Распаковываем архив (безопасно: анти zip-slip, V-03). Вредоносная запись
+        # с `../` могла бы писать вне build_context — в ФС контейнера деплоера, где
+        # смонтированы docker.sock/data/ssl_certs. safe_extract_zip отклоняет такой архив.
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(build_context)
+            artifact_utils.safe_extract_zip(zip_ref, build_context)
 
         # 2. Dockerfile: уважаем свой из репо, иначе генерируем питоновский дефолт.
         dockerfile = build_context / "Dockerfile"

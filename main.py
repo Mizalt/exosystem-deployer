@@ -607,7 +607,7 @@ async def inspect_artifact_zip(
     if not bp:
         raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
 
-    content = await zip_file.read()
+    content = await _read_upload_capped(zip_file)  # V-07: лимит размера
     meta = artifact_utils.inspect_zip(content)
     existing_tags = [a.version_tag for a in bp.artifacts]
     suggested = meta.get("version") or artifact_utils.suggest_next_version(existing_tags)
@@ -616,6 +616,32 @@ async def inspect_artifact_zip(
 
 # Максимальный размер импортируемого архива (защита от OOM при импорте из GitHub).
 MAX_IMPORT_BYTES = 150 * 1024 * 1024  # 150 MB
+# Тот же потолок для ПРЯМОЙ загрузки артефакта (V-07): раньше `await file.read()`
+# читал тело без границы — многогиговый аплоуд исчерпывал RAM ноды (OOM/DoS).
+MAX_ARTIFACT_BYTES = 150 * 1024 * 1024  # 150 MB
+
+
+async def _read_upload_capped(upload: UploadFile) -> bytes:
+    """Читает загружаемый файл в память с верхней границей MAX_ARTIFACT_BYTES (V-07).
+
+    Обрывается на превышении (413), не дожидаясь конца потока, — чтобы огромный
+    аплоуд не «съел» память до проверки. Читаем модульный `MAX_ARTIFACT_BYTES`
+    (не default-аргумент) — так лимит патчится в тестах.
+    """
+    limit = MAX_ARTIFACT_BYTES
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл слишком большой (>{limit // (1024 * 1024)} МБ).")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _create_artifact_from_zip_bytes(db, bp, content: bytes, version_tag: str, description: str):
@@ -668,7 +694,7 @@ async def upload_artifact(
     if not bp:
         raise HTTPException(status_code=404, detail="Приложение (blueprint) не найдено.")
 
-    content = await zip_file.read()
+    content = await _read_upload_capped(zip_file)  # V-07: лимит размера
     return _create_artifact_from_zip_bytes(db, bp, content, version_tag, description)
 
 
