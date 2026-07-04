@@ -9,10 +9,18 @@
 services:
   # Reverse-proxy. Создаётся здесь (а НЕ деплоером), потому что использует
   # bind-mount'ы, чьи пути должны резолвиться на хосте.
+  # Ротация логов нашего стека (ADR-076): без лимита json-логи растут без границы и
+  # забивают диск ноды — частая причина падений мелких VPS (docs/21_HOST_OPS.md).
+  # YAML-якорь переиспользуем во всех сервисах ниже.
   nginx:
     image: nginx:1.25-alpine
     container_name: deployer-nginx-proxy
     restart: unless-stopped
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "80:80"
       - "443:443"
@@ -29,6 +37,7 @@ services:
     image: certbot/certbot:latest
     container_name: deployer-certbot-companion
     restart: unless-stopped
+    logging: *default-logging
     # Полный entrypoint-список: иначе compose токенизирует command по пробелам
     # и `sh -c` получает только первое слово, контейнер сразу выходит.
     entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do sleep 1; done"]
@@ -46,6 +55,7 @@ services:
       dockerfile: Dockerfile
     container_name: deployer
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - nginx
       - certbot

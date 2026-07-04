@@ -134,3 +134,47 @@ def test_cleanup_orphans_empty_known_removes_all(monkeypatch):
 
     assert removed == 2
     assert a.removed and b.removed
+
+
+def test_parse_exposed_ports_prefers_lowest_tcp():
+    # Несколько EXPOSE → наименьший TCP (обычно основной порт приложения).
+    assert docker_manager._parse_exposed_ports({"8080/tcp": {}, "3000/tcp": {}}) == 3000
+    # Только один порт.
+    assert docker_manager._parse_exposed_ports({"3000/tcp": {}}) == 3000
+    # Формат без протокола — трактуем как tcp.
+    assert docker_manager._parse_exposed_ports({"5000": {}}) == 5000
+
+
+def test_parse_exposed_ports_udp_fallback_and_empty():
+    # Нет tcp — берём udp (например DNS-воркер).
+    assert docker_manager._parse_exposed_ports({"53/udp": {}}) == 53
+    # tcp приоритетнее udp.
+    assert docker_manager._parse_exposed_ports({"53/udp": {}, "80/tcp": {}}) == 80
+    # Пусто/None → None (детект не сработал, деплой пойдёт на дефолт/явный порт).
+    assert docker_manager._parse_exposed_ports(None) is None
+    assert docker_manager._parse_exposed_ports({}) is None
+
+
+def test_container_exposed_port_reads_image_config(monkeypatch):
+    class _Ctr:
+        attrs = {"Config": {"ExposedPorts": {"3000/tcp": {}}}}
+
+    class _Client:
+        class containers:
+            @staticmethod
+            def get(cid):
+                return _Ctr()
+
+    monkeypatch.setattr(docker_manager, "client", _Client())
+    assert docker_manager.container_exposed_port("cid") == 3000
+
+
+def test_container_exposed_port_besteffort_none(monkeypatch):
+    class _Client:
+        class containers:
+            @staticmethod
+            def get(cid):
+                raise RuntimeError("gone")
+
+    monkeypatch.setattr(docker_manager, "client", _Client())
+    assert docker_manager.container_exposed_port("cid") is None

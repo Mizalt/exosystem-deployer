@@ -115,7 +115,7 @@ def reconcile(db: Session):
                 # 'starting' — proxy не шлёт трафик в неготовую реплику.
                 # internal_port=0 → воркер без сетевого порта (бот/очередь): health-gate
                 # неприменим, считаем online как только контейнер 'running' (Идея 2а).
-                gate_port = run_config.effective_port(deployment.internal_port)
+                gate_port = run_config.effective_port(deployment.internal_port, deployment.detected_port)
                 if gate_port == 0 or docker_manager.is_app_responding(instance.container_name, gate_port):
                     alive_instances.append(instance)
                     if instance.status != 'online' or (instance.restart_count or 0) != 0:
@@ -221,6 +221,16 @@ def reconcile(db: Session):
                     break  # не долбим сборку в этом цикле; backoff остановит повторы
 
                 if container_id:
+                    # Авто-подхват порта приложения (раз в докерфайле указан EXPOSE):
+                    # если пользователь порт НЕ задавал явно (internal_port=None), берём
+                    # порт из образа → health-gate/proxy пойдут в реальный порт (напр.
+                    # 3000 у Next.js), а не в дефолтные 80 (иначе сервис висит в starting).
+                    if deployment.internal_port is None and deployment.detected_port is None:
+                        detected = docker_manager.container_exposed_port(container_id)
+                        if detected:
+                            deployment.detected_port = detected
+                            print(f"[ORCHESTRATOR] {instance_name}: подхвачен порт из образа "
+                                  f"(EXPOSE {detected}) — health-gate/proxy пойдут на него.")
                     new_instance = models.Instance(
                         deployment_id=deployment.id,
                         container_id=container_id,

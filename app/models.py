@@ -66,7 +66,13 @@ class Deployment(Base):
     # Убирают хардкод «питон-only + порт 80 + нет env». Все опциональны: пусто →
     # питоновский автоген на порту 80 (прежнее поведение). nullable=True, т.к.
     # авто-миграция ADD COLUMN не ставит DEFAULT старым строкам (код коалесит None).
-    internal_port = Column(Integer, default=80, nullable=True)  # порт приложения внутри контейнера; 0 = worker без порта
+    # None = «авто» (порт не задан явно): деплоер подхватит EXPOSE из образа
+    # (detected_port ниже), иначе дефолт 80. 0 = worker без сетевого порта (health-gate
+    # пропускается). Явное число — приоритет над авто-детектом. Раньше default был 80,
+    # из-за чего простой деплой не мог отличить «пользователь выбрал 80» от «дефолт» и
+    # игнорировал EXPOSE приложения (напр. Next.js на 3000 висел в starting).
+    internal_port = Column(Integer, default=None, nullable=True)  # явный порт внутри контейнера; None=авто; 0=worker
+    detected_port = Column(Integer, nullable=True)  # порт, подхваченный из EXPOSE собранного образа (авто-детект)
     run_command = Column(Text, nullable=True)      # команда запуска (напр. 'python bot.py', 'node index.js')
     base_image = Column(String, nullable=True)     # базовый образ сборки (напр. 'node:20-alpine')
     env_vars = Column(Text, nullable=True)         # env-переменные рантайма (JSON-объект строк)

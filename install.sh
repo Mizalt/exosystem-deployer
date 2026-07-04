@@ -16,6 +16,22 @@ command -v docker >/dev/null 2>&1 || die "Docker не установлен. См
 docker compose version >/dev/null 2>&1 || die "Не найден плагин 'docker compose'."
 command -v git >/dev/null 2>&1 || die "git не установлен."
 
+# 1b. Проверка logging-драйвера хоста (ADR-076, docs/21_HOST_OPS.md). Если дефолтный
+#     драйвер не поддерживает чтение (`docker logs`), панель не сможет показать логи
+#     приложений. НЕ меняем daemon.json пользователя молча (это его сервер) — только
+#     предупреждаем и советуем. Наши app-контейнеры всё равно ставят json-file явно.
+LOG_DRIVER=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null || echo "")
+case "$LOG_DRIVER" in
+  json-file|local|"") : ;;  # поддерживают чтение — всё ок
+  *)
+    log "⚠️  Внимание: у Docker выбран logging-драйвер '$LOG_DRIVER', который не"
+    log "    поддерживает чтение логов (docker logs). Рекомендуется json-file с"
+    log "    ротацией — добавьте в /etc/docker/daemon.json:"
+    log '        { "log-driver": "json-file", "log-opts": {"max-size":"10m","max-file":"3"} }'
+    log "    и перезапустите Docker (systemctl restart docker)."
+    ;;
+esac
+
 # 2. Код: клонируем или обновляем
 if [ -d "$INSTALL_DIR/.git" ]; then
   log "Обновляю код в $INSTALL_DIR ..."
