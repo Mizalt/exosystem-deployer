@@ -16,7 +16,7 @@ from app import editions
 
 # Semver сборки деплоера. Бампать при значимых изменениях API/поведения. На проде
 # может переопределяться env `DEPLOYER_VERSION` (напр. проставляется при сборке образа).
-VERSION = "0.11.0"
+VERSION = "0.13.0"
 
 # Capabilities ЭТОЙ сборки — стабильные строки-фичи. Список ТОЛЬКО пополняем
 # (аддитивно): существующие строки не переименовываем и не удаляем, иначе старые
@@ -33,6 +33,8 @@ CAPABILITIES = (
     "advanced_build",   # расширенный режим сборки: база/команда/порт/env (ADR-021)
     "replicas_scale",   # масштабирование реплик + round-robin в прокси (ADR-020)
     "self_update",      # самообновление/откат: POST /api/admin/{update,rollback} (cpk, ADR-071)
+    "host_health",      # здоровье хоста: GET /api/host/health (диск/RAM/swap/load, Ночь 13)
+    "op_metrics",       # замеры операций: GET /api/operation-metrics + стадии/ETA задач (Ночь 14)
 )
 
 

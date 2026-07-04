@@ -313,11 +313,13 @@ document.addEventListener('DOMContentLoaded', () => {
             </header>
             <div class="page-content dashboard-content">
                 <div class="metrics-strip" id="metricsStrip">${metricsSkeletonHTML()}</div>
+                <div id="hostHealthWrap">${hostHealthSkeletonHTML()}</div>
                 <div class="dashboard-view-host" id="dashViewHost"><p style="color:var(--text-secondary)">Загрузка…</p></div>
             </div>`;
         document.getElementById('dashViewSwitcher').querySelectorAll('.view-option').forEach(btn => btn.onclick = () => { localStorage.setItem('dashboardView', btn.dataset.view); renderDashboard(); });
-        document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics'); renderDashboard(); };
+        document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics', 'hostHealth'); renderDashboard(); };
         loadDashboardMetrics();
+        loadHostHealth();
         const host = document.getElementById('dashViewHost');
         try { await DASHBOARD_VIEWS[view].render(host); }
         catch (e) { if (getToken()) host.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки дашборда.</p>`; }
@@ -361,6 +363,65 @@ document.addEventListener('DOMContentLoaded', () => {
             // чтобы полоса метрик не схлопывалась и верстка не прыгала.
             if (getToken()) strip.innerHTML = METRIC_LABELS.map(l => metricCardHTML(l, '—', 'недоступно')).join('');
         }
+    }
+
+    // --- Виджет «Здоровье сервера» (Ночь 13, 21_HOST_OPS волна 1): диск/память/swap/
+    // load ХОСТА с порогами (жёлтый >80%, красный >92%) + warnings от сервера.
+    // Владелец видит переполняющийся диск/отсутствие swap ДО падения (ADR-078),
+    // не заходя по SSH. Значения приходят из GET /api/host/health; на хосте без
+    // /proc (dev-Windows) сервер отдаёт null — карточка честно показывает «—».
+    const HH_LABELS = ['Диск сервера', 'Память сервера', 'Swap', 'Нагрузка'];
+    let lastHostHealthSig = '';
+    function hostHealthSkeletonHTML() {
+        lastHostHealthSig = '';
+        return `<div class="metrics-strip host-health-strip">` + HH_LABELS.map(label =>
+            `<div class="metric-card loading"><div class="metric-label">${label}</div><div class="metric-value"><span class="skel skel-val"></span></div><div class="metric-sub"><span class="skel skel-sub"></span></div></div>`
+        ).join('') + `</div>`;
+    }
+    const hhPct = v => (v == null ? '—' : `${Math.round(v)}%`);
+    // Порог карточки считает СЕРВЕР (status/warnings) — здесь только раскраска значения.
+    const hhLevel = pct => (pct == null ? '' : (pct >= 92 ? 'crit' : (pct >= 80 ? 'warn' : 'ok')));
+    function hhCardHTML(label, pct, sub) {
+        const lvl = hhLevel(pct);
+        const bar = pct == null ? '' :
+            `<div class="hh-bar"><div class="hh-bar-fill ${lvl}" style="width:${Math.max(2, Math.min(100, pct))}%"></div></div>`;
+        return `<div class="metric-card hh-${lvl || 'na'}"><div class="metric-label">${label}</div><div class="metric-value">${hhPct(pct)}</div>${bar}<div class="metric-sub">${sub}</div></div>`;
+    }
+    function fmtUptime(sec) {
+        if (sec == null) return '';
+        const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+        return d > 0 ? `аптайм ${d} д ${h} ч` : `аптайм ${h} ч ${Math.floor((sec % 3600) / 60)} мин`;
+    }
+    async function loadHostHealth() {
+        const wrap = document.getElementById('hostHealthWrap');
+        if (!wrap) return;
+        let h;
+        try { h = await fetchData('hostHealth', '/api/host/health'); }
+        catch (e) {
+            if (getToken()) wrap.innerHTML = `<div class="metrics-strip host-health-strip">${HH_LABELS.map(l => `<div class="metric-card"><div class="metric-label">${l}</div><div class="metric-value">—</div><div class="metric-sub">недоступно</div></div>`).join('')}</div>`;
+            return;
+        }
+        // Точечное обновление: перерисовываем только при изменении данных (без миганий).
+        const sig = JSON.stringify(h);
+        if (sig === lastHostHealthSig) return;
+        lastHostHealthSig = sig;
+        const disk = h.disk || {}, mem = h.memory || {}, swap = h.swap || {};
+        const load = h.load || null, cpu = h.cpu_count;
+        const noSwap = swap.total_mb === 0;
+        const swapCard = noSwap
+            ? `<div class="metric-card hh-warn"><div class="metric-label">Swap</div><div class="metric-value">нет</div><div class="metric-sub">не настроен — риск OOM при сборке</div></div>`
+            : hhCardHTML('Swap', swap.used_pct, swap.total_mb == null ? 'нет данных' : `${(swap.total_mb / 1024).toFixed(1)} GB выделено`);
+        const loadCard = `<div class="metric-card hh-${load && cpu && load[1] > 2 * cpu ? 'warn' : (load ? 'ok' : 'na')}"><div class="metric-label">Нагрузка</div><div class="metric-value">${load ? load[1].toFixed(2) : '—'}</div><div class="metric-sub">${load ? `load 5 мин · ${cpu ?? '?'} CPU${h.uptime_sec != null ? ' · ' + fmtUptime(h.uptime_sec) : ''}` : 'нет данных'}</div></div>`;
+        const warns = (h.warnings || []);
+        const warnHTML = warns.length
+            ? `<div class="host-health-warnings ${h.status === 'crit' ? 'crit' : ''}"><span class="material-symbols-outlined">warning</span>${warns.map(escapeHTML).join(' · ')}</div>`
+            : '';
+        wrap.innerHTML = `<div class="metrics-strip host-health-strip">`
+            + hhCardHTML('Диск сервера', disk.used_pct, disk.free_gb == null ? 'нет данных' : `свободно ${disk.free_gb} GB из ${disk.total_gb} GB`)
+            + hhCardHTML('Память сервера', mem.used_pct, mem.available_mb == null ? 'нет данных' : `доступно ${(mem.available_mb / 1024).toFixed(1)} GB из ${(mem.total_mb / 1024).toFixed(1)} GB`)
+            + swapCard
+            + loadCard
+            + `</div>${warnHTML}`;
     }
 
     // Авто-обновление дашборда после мутирующего запроса (если открыт он и нет модалки).
@@ -1048,6 +1109,39 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!open) menu.classList.add('show');
         });
     }
+    // --- Точечный keyed-рендер списка (Ночь 12, ADR-080, инвариант №9 «UI не врёт»).
+    // Вместо `innerHTML = всё заново` (мигание, сброс открытых меню/фокуса) пересоздаём
+    // ТОЛЬКО элементы с изменившейся сигнатурой данных; порядок — как в items;
+    // исчезнувшие удаляем. Элемент, где пользователь что-то раскрыл (дропдаун/details)
+    // или пишет (фокус), не трогаем до следующего тика.
+    function syncKeyedList(host, items, keyOf, sigOf, buildEl) {
+        const byKey = {};
+        Array.from(host.children).forEach(el => { if (el.dataset && el.dataset.key) byKey[el.dataset.key] = el; });
+        const seen = new Set();
+        items.forEach((item, i) => {
+            const key = String(keyOf(item));
+            const sig = sigOf(item);
+            seen.add(key);
+            let node = byKey[key];
+            if (!node) {
+                node = buildEl(item);
+                node.dataset.key = key;
+                node.dataset.sig = sig;
+            } else if (node.dataset.sig !== sig && !node.querySelector('.dropdown-menu.show, details[open], :focus')) {
+                const fresh = buildEl(item);
+                fresh.dataset.key = key;
+                fresh.dataset.sig = sig;
+                node.replaceWith(fresh);
+                byKey[key] = fresh;
+                node = fresh;
+            }
+            const ref = host.children[i] || null;
+            if (ref !== node) host.insertBefore(node, ref);
+        });
+        Array.from(host.children).forEach(el => {
+            if (!el.dataset || !el.dataset.key || !seen.has(el.dataset.key)) el.remove();
+        });
+    }
     const populateSelect = (select, items, textFn, valueFn, keepFirst = false) => { select.innerHTML = keepFirst ? select.firstElementChild.outerHTML : '<option value="" disabled selected>Выберите...</option>'; items.forEach(item => { const opt = document.createElement('option'); opt.textContent = textFn(item); opt.value = valueFn(item); select.appendChild(opt); }); };
     const formToJSON = form => Object.fromEntries(new FormData(form).entries());
     const postJSON = (form, url, data, successMsg, callback, method = 'POST') =>
@@ -1293,8 +1387,76 @@ document.addEventListener('DOMContentLoaded', () => {
             URL.revokeObjectURL(url);
         } catch (err) { alert(`Ошибка скачивания: ${err.message}`); }
     }
-    async function loadAndDisplayServices() { const container = document.getElementById('servicesContainer'); if (!container) return; try { const services = await fetchData('services', '/api/services'); updateRailCount('services'); container.innerHTML = `<div class="section-title">Все сервисы (${services.length})</div>`; if (services.length === 0) { container.innerHTML += '<p style="color:var(--text-secondary); padding: 16px 0;">Нет запущенных сервисов.</p>'; return; } services.forEach(srv => { const isOnline = srv.status === 'online'; const card = document.createElement('div'); card.className = 'service-card'; card.dataset.serviceData = JSON.stringify(srv); card.innerHTML = ` <div class="service-info"> <div class="status-dot ${srv.status}"></div> <div> <div class="service-name">${escapeHTML(srv.name)}</div> <div class="service-meta">Port: ${srv.assigned_port} &bull; ${escapeHTML(srv.artifact.version_tag)}</div> </div> </div> <div class="service-actions"> <div class="dropdown"> <button class="icon-btn" data-toggle="dropdown"><span class="material-symbols-outlined">more_vert</span></button> <div class="dropdown-menu"> <div data-action="start" ${isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">play_arrow</span>Запустить</div> <div data-action="stop" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">stop</span>Остановить</div> <div data-action="restart" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">refresh</span>Перезапустить</div> <div class="dropdown-item" data-action="redeploy"><span class="material-symbols-outlined">cached</span>Обновить / Откатить</div> <div class="dropdown-item" data-action="config"><span class="material-symbols-outlined">tune</span>Настройки сборки</div> <div data-action="publish" ${isOnline ? 'class="dropdown-item"' : 'class="dropdown-item disabled"'}><span class="material-symbols-outlined">public</span>Опубликовать</div> <hr style="border-color: var(--border); margin: 4px 8px;"> <div class="dropdown-item danger" data-action="delete"><span class="material-symbols-outlined">delete</span>Удалить сервис</div> </div> </div> </div>`; container.appendChild(card); card.addEventListener('click', e => { if (!e.target.closest('.service-actions')) openDetailDrawer('svc', srv.id); }); const dropdownToggle = card.querySelector('[data-toggle="dropdown"]'); const dropdownMenu = card.querySelector('.dropdown-menu'); dropdownToggle.addEventListener('click', e => { e.stopPropagation(); document.querySelectorAll('.dropdown-menu.show').forEach(m => m !== dropdownMenu && m.classList.remove('show')); dropdownMenu.classList.toggle('show'); }); dropdownMenu.addEventListener('click', e => { e.stopPropagation(); const item = e.target.closest('.dropdown-item'); if (item && !item.classList.contains('disabled')) { handleServiceAction(item.dataset.action, srv, card); dropdownMenu.classList.remove('show'); } }); }); } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки сервисов.</p>`; } }
-    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'config': showModal('configModal', () => prepareConfigModal(service)); break; case 'publish': goToStage('applications', () => showModal('applicationModal', () => prepareApplicationModal({ serviceId: service.id }))); break; case 'delete': if (confirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`)) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); }); } break; } }
+    // «~40 с» / «~3 мин» / «~1 ч» — оценка оставшегося времени (Ночь 14).
+    function fmtEta(sec) {
+        if (sec == null) return '';
+        if (sec < 90) return `~${Math.max(Math.round(sec / 10) * 10, 10)} с`;
+        const m = Math.round(sec / 60);
+        return m < 90 ? `~${m} мин` : `~${Math.round(m / 60)} ч`;
+    }
+    // Полоса живого прогресса сборки/пулла (Ночь 14, ADR-082): стадия + процент +
+    // ETA по средним прошлых сборок. percent=null → неопределённая анимация.
+    function buildStripHTML(build) {
+        if (!build) return '';
+        const pct = build.percent;
+        const bar = pct == null
+            ? `<div class="svc-build-bar indeterminate"><div class="svc-build-fill"></div></div>`
+            : `<div class="svc-build-bar"><div class="svc-build-fill" style="width:${Math.max(3, Math.min(100, pct))}%"></div></div>`;
+        const eta = build.eta_seconds != null ? ` · осталось ${fmtEta(build.eta_seconds)}` : '';
+        return `<div class="svc-build">${bar}<div class="svc-build-text">${escapeHTML(build.detail || 'Сборка…')}${eta}</div></div>`;
+    }
+    // Сигнатура карточки сервиса: только рендерящиеся поля (инвариант Ночи 12);
+    // ETA сборки огрубляем до 15 с — иначе карточка пересоздавалась бы каждый тик
+    // (менялись бы только секунды) и закрывала открытое меню.
+    function serviceSig(s) {
+        const b = s.build ? {
+            stage: s.build.stage, percent: s.build.percent, detail: s.build.detail,
+            eta: s.build.eta_seconds != null ? Math.round(s.build.eta_seconds / 15) : null,
+        } : null;
+        return JSON.stringify({ ...s, build: b });
+    }
+    // Карточка сервиса: DOM-узел + обработчики ЕЁ кнопок (scoped — при точечной
+    // перерисовке одной карточки остальные не переподписываются). Ночь 12, ADR-080.
+    function buildServiceCard(srv) {
+        const isOnline = srv.status === 'online';
+        const card = document.createElement('div');
+        card.className = 'service-card';
+        card.dataset.serviceData = JSON.stringify(srv);
+        card.innerHTML = ` <div class="service-info"> <div class="status-dot ${srv.status}"></div> <div> <div class="service-name">${escapeHTML(srv.name)}</div> <div class="service-meta">Port: ${srv.assigned_port} &bull; ${escapeHTML(srv.artifact.version_tag)}</div>${buildStripHTML(srv.build)} </div> </div> <div class="service-actions"> <div class="dropdown"> <button class="icon-btn" data-toggle="dropdown"><span class="material-symbols-outlined">more_vert</span></button> <div class="dropdown-menu"> <div data-action="start" ${isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">play_arrow</span>Запустить</div> <div data-action="stop" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">stop</span>Остановить</div> <div data-action="restart" ${!isOnline ? 'class="dropdown-item disabled"' : 'class="dropdown-item"'}><span class="material-symbols-outlined">refresh</span>Перезапустить</div> <div class="dropdown-item" data-action="redeploy"><span class="material-symbols-outlined">cached</span>Обновить / Откатить</div> <div class="dropdown-item" data-action="config"><span class="material-symbols-outlined">tune</span>Настройки сборки</div> <div data-action="publish" ${isOnline ? 'class="dropdown-item"' : 'class="dropdown-item disabled"'}><span class="material-symbols-outlined">public</span>Опубликовать</div> <hr style="border-color: var(--border); margin: 4px 8px;"> <div class="dropdown-item danger" data-action="delete"><span class="material-symbols-outlined">delete</span>Удалить сервис</div> </div> </div> </div>`;
+        card.addEventListener('click', e => { if (!e.target.closest('.service-actions')) openDetailDrawer('svc', srv.id); });
+        const dropdownToggle = card.querySelector('[data-toggle="dropdown"]');
+        const dropdownMenu = card.querySelector('.dropdown-menu');
+        dropdownToggle.addEventListener('click', e => { e.stopPropagation(); document.querySelectorAll('.dropdown-menu.show').forEach(m => m !== dropdownMenu && m.classList.remove('show')); dropdownMenu.classList.toggle('show'); });
+        dropdownMenu.addEventListener('click', e => { e.stopPropagation(); const item = e.target.closest('.dropdown-item'); if (item && !item.classList.contains('disabled')) { handleServiceAction(item.dataset.action, srv, card); dropdownMenu.classList.remove('show'); } });
+        return card;
+    }
+    async function loadAndDisplayServices() {
+        const container = document.getElementById('servicesContainer');
+        if (!container) return;
+        try {
+            const services = await fetchData('services', '/api/services');
+            updateRailCount('services');
+            // Каркас (заголовок + host карточек) создаётся один раз; дальше — только дифф.
+            let title = container.querySelector(':scope > .section-title');
+            let host = container.querySelector(':scope > [data-services-host]');
+            if (!title || !host) {
+                container.innerHTML = `<div class="section-title"></div><div data-services-host></div>`;
+                title = container.querySelector(':scope > .section-title');
+                host = container.querySelector(':scope > [data-services-host]');
+            }
+            title.textContent = `Все сервисы (${services.length})`;
+            if (services.length === 0) {
+                if (host.dataset.empty !== '1') { host.dataset.empty = '1'; host.innerHTML = '<p style="color:var(--text-secondary); padding: 16px 0;">Нет запущенных сервисов.</p>'; }
+                return;
+            }
+            delete host.dataset.empty;
+            // Точечный рендер: пересоздаются только карточки с изменившимися данными —
+            // индикаторы догоняют правду каждый тик, список не мигает. Сигнатура
+            // без волатильных секунд ETA (см. serviceSig, Ночь 14).
+            syncKeyedList(host, services, s => s.id, serviceSig, buildServiceCard);
+        } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки сервисов.</p>`; }
+    }
+    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; card.dataset.sig = 'action-pending'; /* руками менял DOM → следующий дифф обязан пересоздать карточку */ await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'config': showModal('configModal', () => prepareConfigModal(service)); break; case 'publish': goToStage('applications', () => showModal('applicationModal', () => prepareApplicationModal({ serviceId: service.id }))); break; case 'delete': if (confirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`)) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); }); } break; } }
     async function handleCreateService(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); data.artifact_id = parseInt(data.artifact_id); await postJSON(form, '/api/services', data, "Сервис успешно запущен!", () => { hideModal('serviceModal'); invalidateCache('services'); loadAndDisplayServices(); }); }
     // Потоковый редеплой с ЖИВЫМ WS-логом сборки (ADR-023). Зеркалит issueSslForDomain.
     function streamRedeploy(serviceId, artifactId, logWindow) {
@@ -1327,39 +1489,53 @@ document.addEventListener('DOMContentLoaded', () => {
             invalidateCache('services'); loadAndDisplayServices();
         }
     }
+    // Строка приложения: DOM-узел + обработчики (scoped) — для точечного рендера.
+    function buildAppRow(app) {
+        const proto = app.ssl_cert_name ? 'https' : 'http';
+        const sslCell = app.ssl_cert_name ? `✅ ${escapeHTML(app.ssl_cert_name)}` : '❌ HTTP';
+        const issueBtn = app.ssl_cert_name ? '' : `<button class="btn-icon-label issue-app-ssl-btn" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span>Выпустить SSL</button>`;
+        const tpl = document.createElement('template');
+        tpl.innerHTML = `<tr class="app-row clickable-row" data-app-id="${app.id}" title="Открыть детали приложения">
+            <td>${escapeHTML(app.name)}</td>
+            <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a></td>
+            <td><span class="mono">${escapeHTML(app.service.name)}</span></td>
+            <td>${sslCell}</td>
+            <td><span class="action-row end">
+                ${issueBtn}
+                <button class="icon-btn edit-app-btn" title="Редактировать (домен/SSL)"><span class="material-symbols-outlined">edit</span></button>
+                <button class="icon-btn danger del-app-btn" title="Удалить (снять с публикации)"><span class="material-symbols-outlined">delete</span></button>
+            </span></td>
+        </tr>`;
+        const tr = tpl.content.firstElementChild;
+        // Клик по строке (не по кнопке/ссылке) открывает тот же боковой drawer, что и на
+        // дашборде — детальный просмотр опубликованного приложения (запрос пользователя).
+        tr.addEventListener('click', (e) => {
+            if (e.target.closest('button, a')) return;
+            openDetailDrawer('app', app.id);
+        });
+        const del = tr.querySelector('.del-app-btn');
+        if (del) del.onclick = () => handleApplicationDelete(app.id, app.name);
+        const edit = tr.querySelector('.edit-app-btn');
+        if (edit) edit.onclick = () => openEditApplicationModal(app);
+        const issue = tr.querySelector('.issue-app-ssl-btn');
+        if (issue) issue.onclick = () => handleIssueAppSsl(app.id, app.domain);
+        return tr;
+    }
     async function loadAndDisplayApplications() {
         const tableBody = document.querySelector('#appsTable tbody');
         if (!tableBody) return;
         try {
             const apps = await fetchData('applications', '/api/applications');
             updateRailCount('applications');
-            if (apps.length === 0) { tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Нет опубликованных приложений.</td></tr>`; return; }
-            tableBody.innerHTML = apps.map(app => {
-                const proto = app.ssl_cert_name ? 'https' : 'http';
-                const sslCell = app.ssl_cert_name ? `✅ ${escapeHTML(app.ssl_cert_name)}` : '❌ HTTP';
-                const issueBtn = app.ssl_cert_name ? '' : `<button class="btn-icon-label issue-app-ssl-btn" data-app-id="${app.id}" data-domain="${escapeHTML(app.domain)}" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span>Выпустить SSL</button>`;
-                return `<tr class="app-row clickable-row" data-app-id="${app.id}" title="Открыть детали приложения">
-                    <td>${escapeHTML(app.name)}</td>
-                    <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a></td>
-                    <td><span class="mono">${escapeHTML(app.service.name)}</span></td>
-                    <td>${sslCell}</td>
-                    <td><span class="action-row end">
-                        ${issueBtn}
-                        <button class="icon-btn edit-app-btn" data-app-id="${app.id}" title="Редактировать (домен/SSL)"><span class="material-symbols-outlined">edit</span></button>
-                        <button class="icon-btn danger del-app-btn" data-app-id="${app.id}" data-app-name="${escapeHTML(app.name)}" title="Удалить (снять с публикации)"><span class="material-symbols-outlined">delete</span></button>
-                    </span></td>
-                </tr>`;
-            }).join('');
-            // Клик по строке (не по кнопке/ссылке) открывает тот же боковой drawer, что и на
-            // дашборде — детальный просмотр опубликованного приложения (запрос пользователя).
-            tableBody.querySelectorAll('tr.app-row[data-app-id]').forEach(tr => tr.addEventListener('click', (e) => {
-                if (e.target.closest('button, a')) return;
-                openDetailDrawer('app', parseInt(tr.dataset.appId, 10));
-            }));
-            tableBody.querySelectorAll('.del-app-btn').forEach(btn => btn.onclick = () => handleApplicationDelete(btn.dataset.appId, btn.dataset.appName));
-            tableBody.querySelectorAll('.edit-app-btn').forEach(btn => btn.onclick = () => openEditApplicationModal(apps.find(a => a.id == btn.dataset.appId)));
-            tableBody.querySelectorAll('.issue-app-ssl-btn').forEach(btn => btn.onclick = () => handleIssueAppSsl(btn.dataset.appId, btn.dataset.domain));
-        } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Ошибка загрузки приложений.</td></tr>`; }
+            if (apps.length === 0) {
+                if (tableBody.dataset.empty !== '1') { tableBody.dataset.empty = '1'; tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Нет опубликованных приложений.</td></tr>`; }
+                return;
+            }
+            delete tableBody.dataset.empty;
+            // Точечный рендер (Ночь 12): страница живая — фоновый выпуск SSL сам
+            // «зазеленит» строку без F5, при этом таблица не мигает на поллинге.
+            syncKeyedList(tableBody, apps, a => a.id, a => JSON.stringify(a), buildAppRow);
+        } catch (error) { if (getToken()) { delete tableBody.dataset.empty; tableBody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Ошибка загрузки приложений.</td></tr>`; } }
     }
     async function handleApplicationDelete(appId, appName) { if (!confirm(`Вы уверены, что хотите удалить приложение (снять с публикации) "${appName}"?\n\nЭто действие НЕ остановит работающий сервис, а только уберет публичный доступ к нему.`)) return; await deleteJSON(`/api/applications/${appId}`, "Приложение успешно удалено.", () => { invalidateCache('applications'); loadAndDisplayApplications(); }); }
     async function openEditApplicationModal(app) {
@@ -1670,9 +1846,11 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.title = 'Открыть сервис через прокси деплоера';
             btn.onclick = () => window.open(url, '_blank', 'noopener');
         } else {
-            btn.disabled = false;
-            btn.title = 'Сервис не опубликован';
-            btn.onclick = () => alert('Сервис ещё не опубликован. Нажмите «Опубликовать» (домен/публичная точка входа), затем откройте.');
+            // Инвариант №9 (Ночь 12): невозможное действие — честный disabled с
+            // причиной, а не активная кнопка с alert-сюрпризом.
+            btn.disabled = true;
+            btn.title = 'Сервис ещё не опубликован — нажмите «Опубликовать», кнопка включится сама';
+            btn.onclick = null;
         }
     }
 
@@ -1682,10 +1860,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Live-обновление UI (поллинг): статусы/индикаторы и логи без переклика. ---
     // Один постоянный таймер; на каждом тике сам решает по текущей странице, что
     // обновлять. Не мешает модалкам/дропдаунам/скрытой вкладке.
-    let pollTimer = null, lastServicesSig = '';
+    let pollTimer = null, lastServicesSig = '', lastCertsSig = '';
     const POLL_MS = 4000;
     const startPolling = () => { stopPolling(); pollTimer = setInterval(pollTick, POLL_MS); };
     const stopPolling = () => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; };
+    // Перерисовать то, что сейчас на экране, из свежего кэша (после invalidate).
+    // Зовётся при завершении фоновой задачи и после закрытия модалок (Ночь 12).
+    function refreshCurrentPage() {
+        const page = window.location.hash.replace('#', '') || 'services';
+        if (currentStage === 'services' && document.getElementById('servicesContainer')) loadAndDisplayServices();
+        if (currentStage === 'applications' && document.querySelector('#appsTable tbody')) loadAndDisplayApplications();
+        if (page === 'ssl' && document.querySelector('#certsTable tbody')) { lastCertsSig = ''; loadAndDisplayCerts(); }
+        if (page === 'dashboard') { invalidateCache('systemMetrics'); renderDashboard(); }
+    }
 
     // --- Центр фоновых задач (Ночь 10, ADR-069) ---
     // Долгие операции (публикация с DNS-ожиданием, выпуск SSL) идут в фоне на сервере
@@ -1795,8 +1982,18 @@ document.addEventListener('DOMContentLoaded', () => {
         if (a.status === 'error') btns.push(`<button class="btn-icon-label" data-retry="${a.id}"><span class="material-symbols-outlined">refresh</span>Повторить</button>`);
         if (!taskIsActive(a)) btns.push(`<button class="btn-icon-label" data-dismiss="${a.id}"><span class="material-symbols-outlined">close</span>Убрать</button>`);
         const log = a.log ? `<details class="task-item-log" data-log-id="${a.id}"${logOpen ? ' open' : ''}><summary>Журнал</summary><pre>${escapeHTML(a.log)}</pre></details>` : '';
+        // Стадия активной задачи + честный ETA (Ночь 14): для DNS вместо числа —
+        // вилка «от минут до суток» (фаза вне нашего контроля, ADR-066/082).
+        let stage = '';
+        if (taskIsActive(a) && a.stage_label) {
+            const eta = a.unpredictable
+                ? escapeHTML(a.hint || 'от минут до суток')
+                : (a.eta_seconds != null ? `осталось ${fmtEta(a.eta_seconds)}` : '');
+            stage = `<div class="task-item-stage"><span class="task-stage-chip">${escapeHTML(a.stage_label)}</span>${eta ? `<span class="task-stage-eta">${eta}</span>` : ''}</div>`;
+        }
         return `<div class="task-item">
             <div class="task-item-head">${icon}<span class="task-item-title" title="${escapeHTML(a.title || '')}">${escapeHTML(a.title || a.type)}</span><span class="task-item-status ${a.status}">${TASK_STATUS_RU[a.status] || a.status}</span></div>
+            ${stage}
             ${taskResultHTML(a)}
             ${log}
             ${btns.length ? `<div class="task-item-actions">${btns.join('')}</div>` : ''}
@@ -1819,7 +2016,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (prev && prev !== a.status && (a.status === 'done' || a.status === 'error')) {
                     const ok = a.status === 'done';
                     tcToast(`${a.title || 'Задача'}: ${a.result || (ok ? 'готово' : 'ошибка')}`, ok ? 'success' : 'error');
-                    if (a.status === 'done') { invalidateCache('applications', 'certs'); }
+                    // Результат фоновой задачи меняет мир (публикация/SSL/привязка) —
+                    // текущая страница обязана узнать САМА, без F5 (инвариант №9).
+                    invalidateCache('applications', 'certs', 'services');
+                    refreshCurrentPage();
                 }
             });
         }
@@ -1875,27 +2075,51 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.querySelector('.modal-backdrop.show')) return;  // не дёргаем во время модалок
         const page = window.location.hash.replace('#', '') || 'services';
         const onServices = currentStage === 'services' && document.getElementById('servicesContainer');
+        const onApplications = currentStage === 'applications' && document.querySelector('#appsTable tbody');
         const onDashboard = page === 'dashboard';
-        if (!onServices && !onDashboard) return;
+        const onSsl = page === 'ssl' && document.querySelector('#certsTable tbody');
         try {
-            invalidateCache('services');
-            const services = await fetchData('services', '/api/services');
-            const sig = services.map(s => `${s.id}:${s.status}:${s.assigned_port}:${(s.applications || []).length}`).sort().join('|');
-            const changed = sig !== lastServicesSig;
-            lastServicesSig = sig;
-            const drawerOpen = document.getElementById('detailDrawer').classList.contains('show');
-            if (onServices) {
-                // Список перерисовываем при изменении, когда не открыт дропдаун и не открыт drawer
-                // (он поверх списка — лишний ре-рендер не нужен).
-                if (changed && !document.querySelector('.dropdown-menu.show') && !drawerOpen) loadAndDisplayServices();
-                pollServiceDrawer(services);  // живые логи/статы открытого drawer сервиса
-            } else if (onDashboard) {
-                // Drawer открыт → живёт-обновляем его (а дашборд под ним не трогаем, чтобы не сбить zoom).
-                if (drawerOpen) pollServiceDrawer(services);
-                else if (changed) { invalidateCache('systemMetrics'); renderDashboard(); }
+            if (onServices || onDashboard) {
+                invalidateCache('services');
+                const services = await fetchData('services', '/api/services');
+                const sig = services.map(s => `${s.id}:${s.status}:${s.assigned_port}:${(s.applications || []).length}`).sort().join('|');
+                const changed = sig !== lastServicesSig;
+                lastServicesSig = sig;
+                const drawerOpen = document.getElementById('detailDrawer').classList.contains('show');
+                if (onServices) {
+                    // Keyed-дифф (Ночь 12): зовём каждый тик — перерисуются только карточки
+                    // с изменившимися данными; открытые дропдауны/drawer не мешают правде.
+                    loadAndDisplayServices();
+                    pollServiceDrawer(services);  // живые логи/статы открытого drawer сервиса
+                } else if (onDashboard) {
+                    // Drawer открыт → живёт-обновляем его (а дашборд под ним не трогаем, чтобы не сбить zoom).
+                    if (drawerOpen) pollServiceDrawer(services);
+                    else {
+                        if (changed) { invalidateCache('systemMetrics'); renderDashboard(); }
+                        // Здоровье хоста живёт своим диффом (Ночь 13): диск/память
+                        // ползут независимо от сервисов — обновляем каждый тик.
+                        else { invalidateCache('hostHealth'); loadHostHealth(); }
+                    }
+                }
+            } else if (onApplications) {
+                // Страница «Приложения» тоже живая (жалоба: SSL выпущен в фоне, а страница
+                // «не знала» до F5). Дифф-рендер — обновление без миганий.
+                invalidateCache('applications');
+                await fetchData('applications', '/api/applications');
+                loadAndDisplayApplications();
+            } else if (onSsl) {
+                // Список сертификатов: фоновый выпуск добавляет строки — тоже без F5.
+                invalidateCache('certs');
+                const certs = await fetchData('certs', '/api/ssl/certificates');
+                const csig = JSON.stringify(certs);
+                if (csig !== lastCertsSig) { lastCertsSig = csig; loadAndDisplayCerts(); }
             }
         } catch (_) { /* тихо: следующий тик повторит */ }
     }
+    // Вкладка снова видима → немедленно догоняем правду (пропущенные тики).
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && getToken()) pollTick();
+    });
     // prep может быть как async (возвращает Promise), так и СИНХРОННЫМ (prepareConfigModal
     // возвращает undefined). Раньше безусловный prep().catch() падал на undefined.catch
     // → модалка «Настройки сборки» вообще не открывалась. Теперь терпимо к обоим случаям.
@@ -1908,7 +2132,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         document.getElementById(id).classList.add('show');
     };
-    const hideModal = id => document.getElementById(id).classList.remove('show');
+    const hideModal = id => {
+        document.getElementById(id).classList.remove('show');
+        // Модалка блокировала тики (см. pollTick) — закрылась → сразу догоняем правду.
+        setTimeout(() => { try { pollTick(); } catch (_) { /* тихо */ } }, 250);
+    };
 
     // --- Глобальные Обработчики и Запуск ---
     // Пресет-чипы расширенной сборки: заполняют базовый образ / команду / порт в форме.

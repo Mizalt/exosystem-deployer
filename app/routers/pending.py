@@ -40,7 +40,16 @@ def _unique_app_name(db: Session, base: str) -> str:
 @router.get("", response_model=List[schemas.PendingActionOut])
 def list_actions(current_user: CurrentUser, db: Session = Depends(get_db),
                  active_only: bool = False):
-    return crud.list_pending_actions(db, active_only=active_only)
+    """Список задач + текущая стадия/ETA активных (Ночь 14, ADR-082): UI показывает
+    «что происходит и сколько осталось (оценка)», а не голый статус running."""
+    from app.services import pending_actions as pa
+    stats = crud.operation_stats(db)  # один запрос средних на весь список
+    out = []
+    for action in crud.list_pending_actions(db, active_only=active_only):
+        row = schemas.PendingActionOut.model_validate(action).model_dump()
+        row.update(pa.describe_stage(db, action, stats=stats) or {})
+        out.append(row)
+    return out
 
 
 @router.post("/publish", response_model=schemas.PendingActionOut, status_code=201)
@@ -122,6 +131,7 @@ def retry_action(action_id: int, current_user: CurrentUser, db: Session = Depend
         params = {}
     params.pop("ssl_attempts", None)
     params.pop("wait_since", None)
+    params.pop("dns_confirmed", None)  # повтор заново проверяет DNS (стадия честная)
     action.params = json.dumps(params, ensure_ascii=False)
     db.commit()
     db.refresh(action)

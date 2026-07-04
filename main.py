@@ -173,13 +173,31 @@ def get_version_info():
 @app.get("/api/services", tags=["Services Compatibility Layer"])
 def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)):
     """Эмулирует список сервисов из списка деплоев."""
+    from app.services import build_progress, op_metrics
     deployments = crud.get_deployments(db)
+    # ETA сборки по средним прошлых прогонов (Ночь 14) — один запрос на список.
+    build_avg = op_metrics.avg_seconds(db, "build")
     services = []
     for dep in deployments:
         first_instance = dep.instances[0] if dep.instances else None
         port = first_instance.assigned_port if first_instance else 0
         status = first_instance.status if first_instance else "offline"
         online_count = sum(1 for i in dep.instances if i.status == "online")
+
+        # Живой прогресс сборки (Ночь 14, ADR-082): тег образа content-addressed —
+        # формула та же, что у оркестратора, поэтому ищем сборку именно этого
+        # (версия+конфиг) в реестре. None — сборка сейчас не идёт.
+        build = None
+        if dep.artifact and dep.artifact.zip_hash:
+            tag = docker_manager.compute_image_tag(dep.artifact.zip_hash, {
+                "base_image": dep.base_image,
+                "run_command": dep.run_command,
+                "internal_port": run_config.effective_port(dep.internal_port),
+            })
+            build = build_progress.get(tag)
+            if build and build_avg:
+                build["eta_seconds"] = max(
+                    round(build_avg - (build.get("elapsed_seconds") or 0)), 5)
 
         services.append({
             "id": dep.id,
@@ -208,6 +226,9 @@ def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)
                 {"id": a.id, "name": a.name, "domain": a.domain, "ssl": bool(a.ssl_cert_name)}
                 for a in dep.applications
             ],
+            # Живой прогресс сборки/пулла (Ночь 14): {stage, percent, detail,
+            # elapsed_seconds, eta_seconds} или None, когда сборка не идёт.
+            "build": build,
         })
     return services
 
@@ -556,6 +577,47 @@ def get_system_metrics(current_user: CurrentUser):
     except Exception as e:
         print(f"ERROR: get_system_metrics endpoint failed: {e}")
         return {"host": {}, "disk": {}, "load": {}}
+
+
+@app.get("/api/host/health", tags=["System"])
+def get_host_health(current_user: CurrentUser):
+    """Здоровье ХОСТА: диск/память/swap/load/uptime/docker + warnings (Ночь 13).
+
+    Уровень A observability из `21_HOST_OPS.md`: владелец видит переполняющийся
+    диск/отсутствие swap ДО падения (инцидент ADR-078), не заходя по SSH. Панель
+    показывает виджет на дашборде; ЛК зеркалит снимок в карточку сервера
+    (capability `host_health`). Всегда 200: недоступные источники — None.
+    Только под auth — host-данные наружу не светим (в отличие от /api/version).
+    """
+    from app.services import host_health
+    try:
+        client = get_docker_client()
+    except Exception:  # noqa: BLE001 — Docker лежит: снимок без docker-блока
+        client = None
+    return host_health.collect(client)
+
+
+@app.get("/api/operation-metrics", tags=["System"])
+def get_operation_metrics(current_user: CurrentUser, db: Session = Depends(get_db),
+                          limit: int = 100):
+    """Замеры долгих операций ноды + средние (Ночь 14, ADR-082; capability `op_metrics`).
+
+    Средние (по kind: build/ssl_issue/dns_wait/self_update) питают ETA в UI;
+    сырые строки — диагностика «что тормозит именно на этой ноде». ЛК зеркалит
+    `stats` в супер-админку (аналитика бутылочных горлышек по всем нодам).
+    Только под auth: длительности операций — операционные данные владельца.
+    """
+    limit = max(1, min(limit, 500))
+    rows = crud.list_operation_metrics(db, limit=limit)
+    return {
+        "stats": crud.operation_stats(db),
+        "rows": [{
+            "id": r.id, "kind": r.kind, "subject": r.subject,
+            "duration_seconds": r.duration_seconds, "outcome": r.outcome,
+            "meta": r.meta,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows],
+    }
 
 
 # === УРОВЕНЬ 1: API для Библиотеки (Blueprints & Artifacts) ===

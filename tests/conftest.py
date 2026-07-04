@@ -59,6 +59,31 @@ def deployment(db):
 
 
 # --------------------------------------------------------------------------- #
+#  Изоляция фоновых замеров операций (Ночь 14, ADR-082)
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _op_metrics_isolated(monkeypatch):
+    """`op_metrics.record` без явной сессии открывает `SessionLocal` (файловая
+    data/deployer.db) — из тестов перенаправляем в одноразовую in-memory БД,
+    чтобы сборки/задачи в тестах не писали замеры в дев-базу репозитория.
+    Ленивая инициализация: тесты, не пишущие замеры, ничего не платят."""
+    from app.services import op_metrics
+    state = {}
+
+    def _lazy_session():
+        if "Session" not in state:
+            engine = create_engine(
+                "sqlite://", connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
+            Base.metadata.create_all(engine)
+            state["Session"] = sessionmaker(bind=engine)
+        return state["Session"]()
+
+    monkeypatch.setattr(op_metrics, "SessionLocal", _lazy_session)
+
+
+# --------------------------------------------------------------------------- #
 #  Фейковый Docker
 # --------------------------------------------------------------------------- #
 class FakeContainer:

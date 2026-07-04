@@ -42,6 +42,13 @@ header { padding: 24px 32px; display: flex; justify-content: space-between; alig
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 .service-name { font-weight: 500; font-size: 16px; margin-bottom: 2px; }
 .service-meta { color: var(--text-secondary); font-size: 13px; }
+/* Полоса живого прогресса сборки/пулла на карточке сервиса (Ночь 14, ADR-082) */
+.svc-build { margin-top: 8px; width: min(320px, 60vw); }
+.svc-build-bar { height: 4px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.svc-build-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .6s ease; }
+.svc-build-bar.indeterminate .svc-build-fill { width: 30%; animation: svc-build-slide 1.4s ease-in-out infinite; }
+@keyframes svc-build-slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+.svc-build-text { margin-top: 4px; font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .service-actions { display: flex; gap: 6px; align-items: center; }
 .icon-btn { background: none; border: none; color: var(--text-secondary); width: 36px; height: 36px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
 .icon-btn:hover:not(:disabled) { background: rgba(168, 199, 250, 0.15); color: var(--accent); }
@@ -361,6 +368,20 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .skel-sub { width: 116px; height: 11px; }
 @keyframes skel-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
+/* Виджет «Здоровье сервера» (Ночь 13): пороги — жёлтый >80%, красный >92%. */
+.host-health-strip { margin-top: 2px; }
+.metric-card.hh-warn { border-color: rgba(224, 160, 0, 0.55); }
+.metric-card.hh-warn .metric-value { color: var(--warning, #e0a000); }
+.metric-card.hh-crit { border-color: rgba(242, 139, 130, 0.6); }
+.metric-card.hh-crit .metric-value { color: var(--danger); }
+.hh-bar { height: 5px; border-radius: 3px; background: var(--bg-hover); margin: 4px 0 6px; overflow: hidden; }
+.hh-bar-fill { height: 100%; border-radius: 3px; background: var(--success); transition: width 0.4s; }
+.hh-bar-fill.warn { background: var(--warning, #e0a000); }
+.hh-bar-fill.crit { background: var(--danger); }
+.host-health-warnings { display: flex; gap: 8px; align-items: center; margin-top: 10px; padding: 10px 14px; font-size: 13px; color: var(--warning, #e0a000); background: rgba(224, 160, 0, 0.08); border: 1px solid rgba(224, 160, 0, 0.4); border-radius: 12px; }
+.host-health-warnings.crit { color: var(--danger); background: rgba(242, 139, 130, 0.08); border-color: rgba(242, 139, 130, 0.5); }
+.host-health-warnings .material-symbols-outlined { font-size: 18px; flex-shrink: 0; }
+
 /* Баннер первичного доступа (ADR-014). */
 .banner-warn { display: flex; gap: 14px; align-items: flex-start; max-width: 560px; margin-bottom: 16px; padding: 16px 18px; background: rgba(242, 139, 130, 0.08); border: 1px solid rgba(242, 139, 130, 0.5); border-radius: 14px; }
 .banner-warn .material-symbols-outlined { color: var(--danger); flex-shrink: 0; margin-top: 2px; }
@@ -599,6 +620,10 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .task-item-status.error { color: var(--danger); background: rgba(242,139,130,0.12); }
 .task-item-result { font-size: 13px; color: var(--text-secondary); margin-top: 8px; word-break: break-word; }
 .task-item-result a { color: var(--accent); }
+/* Стадия активной задачи + честный ETA/вилка (Ночь 14, ADR-082) */
+.task-item-stage { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.task-stage-chip { font-size: 11px; font-weight: 500; color: var(--accent); background: rgba(168,199,250,0.12); border-radius: 20px; padding: 2px 10px; white-space: nowrap; }
+.task-stage-eta { font-size: 12px; color: var(--text-secondary); }
 .task-item-actions { display: flex; gap: 8px; margin-top: 10px; }
 .task-item-actions .btn-icon-label { padding: 6px 10px; font-size: 12px; }
 .task-item-log { margin-top: 8px; }
