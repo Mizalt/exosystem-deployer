@@ -52,6 +52,13 @@ services:
     environment:
       # Для прода задайте сильный ключ в .env (см. .env.example).
       - DEPLOYER_SECRET_KEY=${DEPLOYER_SECRET_KEY:-}
+      # Мастер-ключ SecretBox (шифрование секретов at-rest; V-04, ADR-074).
+      # Пусто → автогенерация файла data/master.key (dev). REQUIRED=true →
+      # отказ старта без ключа из env (прод, см. docs/07_DEPLOY.md).
+      - DEPLOYER_MASTER_KEY=${DEPLOYER_MASTER_KEY:-}
+      - DEPLOYER_MASTER_KEY_REQUIRED=${DEPLOYER_MASTER_KEY_REQUIRED:-false}
+      # Контактный email Let's Encrypt (уведомления об истечении сертификатов).
+      - DEPLOYER_ACME_EMAIL=${DEPLOYER_ACME_EMAIL:-}
       # Как nginx видит деплоер в общей сети — по имени контейнера.
       - DEPLOYER_PROXY_HOST=deployer
     volumes:
