@@ -32,6 +32,19 @@ case "$LOG_DRIVER" in
     ;;
 esac
 
+# 1c. Память/swap (ADR-078, docs/21_HOST_OPS.md). Сборка приложений (напр.
+#     `npm run build`) на сервере с малым RAM и БЕЗ swap может исчерпать память и
+#     подвесить весь хост. НЕ создаём swap молча (это сервер пользователя, ADR-072) —
+#     предупреждаем и даём готовую команду.
+RAM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+HAS_SWAP=$(swapon --show 2>/dev/null | grep -c swap || echo 0)
+if [ -n "$RAM_MB" ] && [ "$RAM_MB" -lt 3000 ] && [ "$HAS_SWAP" -eq 0 ]; then
+  log "⚠️  У сервера ~${RAM_MB} МБ RAM и НЕТ swap. Сборка тяжёлых приложений может"
+  log "    исчерпать память и подвесить хост. Рекомендуется добавить swap (2 ГБ):"
+  log "        fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+  log '        echo "/swapfile none swap sw 0 0" >> /etc/fstab'
+fi
+
 # 2. Код: клонируем или обновляем
 if [ -d "$INSTALL_DIR/.git" ]; then
   log "Обновляю код в $INSTALL_DIR ..."

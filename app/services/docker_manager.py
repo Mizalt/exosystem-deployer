@@ -403,6 +403,37 @@ def prune_deployer_images(wanted_tags) -> int:
     return removed
 
 
+def prune_dangling_images(prune_build_cache: bool = True) -> dict:
+    """Удаляет dangling-образы (и, опц., build-кэш) — защита диска ноды (ADR-078).
+
+    Многостадийные сборки (`FROM … AS deps/build/runner`, типично для Node/Next.js)
+    оставляют промежуточные СТАДИИ как dangling-образы. `prune_deployer_images` чистит
+    только теги `deployer-cache:*`, а dangling — нет. За серию пересборок (напр. смена
+    конфига/порта → build_first_swap) они забивают диск в ноль → сборки падают, Docker
+    ломается, нода в thrash. Живой инцидент 2026-07-04: 6.7 ГБ dangling → диск 100%.
+
+    Безопасно: `filters={'dangling': True}` не трогает теговые/используемые образы.
+    Best-effort — возвращает {'images_deleted', 'space_reclaimed'} (0 при сбое)."""
+    out = {"images_deleted": 0, "space_reclaimed": 0}
+    try:
+        res = client.images.prune(filters={"dangling": True})
+        out["images_deleted"] = len(res.get("ImagesDeleted") or [])
+        out["space_reclaimed"] = res.get("SpaceReclaimed", 0) or 0
+    except Exception as e:
+        print(f"ERROR: dangling prune: {e}")
+    if prune_build_cache:
+        try:
+            bc = client.api.prune_builds()  # build cache (низкоуровневый API)
+            out["space_reclaimed"] += bc.get("SpaceReclaimed", 0) or 0
+        except Exception as e:  # noqa: BLE001 — не критично
+            print(f"ERROR: build cache prune: {e}")
+    if out["images_deleted"] or out["space_reclaimed"]:
+        mb = out["space_reclaimed"] / (1024 * 1024)
+        print(f"INFO: dangling prune: удалено {out['images_deleted']} образов, "
+              f"освобождено ~{mb:.0f} МБ.")
+    return out
+
+
 def get_running_deployment_containers():
     """Возвращает список ID контейнеров, управляемых нашим деплоером."""
     try:

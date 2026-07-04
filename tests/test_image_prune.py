@@ -97,3 +97,39 @@ def test_collect_wanted_tags_matches_build_formula(db, deployment):
         {"base_image": None, "run_command": None, "internal_port": 80},
     )
     assert wanted == {expected}
+
+
+# --- prune_dangling_images (ADR-078: диск-гигиена) -------------------------- #
+
+def test_prune_dangling_images_counts_and_space(monkeypatch):
+    class _Api:
+        def prune_builds(self):
+            return {"SpaceReclaimed": 1000}
+
+    class _Images:
+        def prune(self, filters=None):
+            assert filters == {"dangling": True}
+            return {"ImagesDeleted": [{"Deleted": "a"}, {"Deleted": "b"}],
+                    "SpaceReclaimed": 5_000_000}
+
+    class _Client:
+        images = _Images()
+        api = _Api()
+
+    monkeypatch.setattr(docker_manager, "client", _Client())
+    out = docker_manager.prune_dangling_images()
+    assert out["images_deleted"] == 2
+    assert out["space_reclaimed"] == 5_001_000  # образы + build-кэш
+
+
+def test_prune_dangling_images_besteffort_on_error(monkeypatch):
+    class _Images:
+        def prune(self, filters=None):
+            raise RuntimeError("docker down")
+
+    class _Client:
+        images = _Images()
+
+    monkeypatch.setattr(docker_manager, "client", _Client())
+    out = docker_manager.prune_dangling_images(prune_build_cache=False)
+    assert out == {"images_deleted": 0, "space_reclaimed": 0}  # не падает
