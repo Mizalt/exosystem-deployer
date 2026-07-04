@@ -52,7 +52,17 @@ def env_from_json(value) -> dict:
     return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
-def effective_port(internal_port) -> int:
-    """None → дефолт 80 (старые деплои без колонки после ADD COLUMN); 0 сохраняется
-    (worker без сетевого порта)."""
-    return DEFAULT_INTERNAL_PORT if internal_port is None else int(internal_port)
+def effective_port(internal_port, detected_port=None) -> int:
+    """Эффективный порт приложения внутри контейнера, с приоритетами:
+
+      1) явно заданный `internal_port` (число, включая 0 = worker без порта) — приоритет;
+      2) `detected_port` — авто-подхват из `EXPOSE` собранного образа (напр. Next.js на
+         3000, когда пользователь порт не указывал);
+      3) дефолт 80 (питоновский автоген / старые деплои).
+
+    `internal_port=None` означает «авто» — тогда работает детект/дефолт."""
+    if internal_port is not None:
+        return int(internal_port)
+    if detected_port is not None:
+        return int(detected_port)
+    return DEFAULT_INTERNAL_PORT

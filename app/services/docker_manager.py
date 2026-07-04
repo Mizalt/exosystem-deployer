@@ -49,6 +49,13 @@ BUILD_STRATEGY = "v4-advanced"
 # Репозиторий тегов образов, собираемых деплоером (content-addressed кэш).
 IMAGE_REPO = "deployer-cache"
 
+# Logging для app-контейнеров (ADR-076): json-file поддерживает чтение (`docker logs`
+# и наша диагностика работают на любом хосте) + ротация защищает диск ноды. Задаём
+# ЯВНО на каждом контейнере — не полагаемся на дефолтный драйвер хоста, который может
+# быть syslog/journald/none без поддержки чтения.
+APP_LOG_CONFIG = docker.types.LogConfig(
+    type="json-file", config={"max-size": "10m", "max-file": "3"})
+
 
 def compute_image_tag(base_key: str, build_config: dict = None) -> str:
     """Детерминированный тег образа по (контент артефакта + стратегия + конфиг).
@@ -182,6 +189,38 @@ def is_app_responding(container_name: str, port: int = 80, timeout: float = 1.0)
         return False
 
 
+def _parse_exposed_ports(exposed: dict | None) -> int | None:
+    """Из `Config.ExposedPorts` ({'3000/tcp': {}, ...}) → наименьший TCP-порт или None.
+
+    TCP приоритетно (веб-сервисы); если только udp — берём его. Наименьший —
+    детерминированный выбор при нескольких EXPOSE (обычно основной порт ниже)."""
+    if not exposed:
+        return None
+    tcp, other = [], []
+    for spec in exposed:
+        try:
+            num_s, _, proto = str(spec).partition("/")
+            num = int(num_s)
+        except (ValueError, AttributeError):
+            continue
+        (tcp if proto in ("tcp", "") else other).append(num)
+    ports = sorted(tcp) or sorted(other)
+    return ports[0] if ports else None
+
+
+def container_exposed_port(container_id: str) -> int | None:
+    """Порт, объявленный `EXPOSE` в образе контейнера (авто-подхват порта приложения).
+
+    Читаем `Config.ExposedPorts` — это то, что разработчик написал в своём Dockerfile
+    (`EXPOSE 3000`). Best-effort: любой сбой инспекции → None (детект необязателен)."""
+    try:
+        container = client.containers.get(container_id)
+        cfg = (container.attrs.get("Config", {}) or {})
+        return _parse_exposed_ports(cfg.get("ExposedPorts"))
+    except Exception:  # noqa: BLE001 — детект не критичен, не роняем деплой
+        return None
+
+
 def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_key: str = None,
                    build_config: dict = None, env_vars: dict = None):
     """
@@ -218,6 +257,12 @@ def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_
             detach=True,
             restart_policy={"Name": "unless-stopped"},
             environment=env_vars or None,  # env-переменные рантайма (Идея 2а)
+            # Явный json-file c ротацией на КАЖДОМ app-контейнере (ADR-076):
+            # 1) `docker logs`/наша диагностика читаются ВСЕГДА, даже если у хоста
+            #    дефолтный logging-драйвер без чтения (была «configured logging driver
+            #    does not support reading» — панель не показывала логи упавшего сервиса);
+            # 2) ротация (10 МБ×3) — логи приложения не заполняют диск ноды.
+            log_config=APP_LOG_CONFIG,
             labels={"manager": "cloud-deployer"}  # Метка для легкого поиска
         )
         print(f"SUCCESS: Container {container.short_id} started.")

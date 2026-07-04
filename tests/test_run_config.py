@@ -40,3 +40,14 @@ def test_effective_port():
     assert run_config.effective_port(None) == 80  # старый деплой без колонки
     assert run_config.effective_port(8080) == 8080
     assert run_config.effective_port(0) == 0       # worker без сетевого порта сохраняется
+
+
+def test_effective_port_prefers_explicit_then_detected_then_default():
+    # Явный порт — приоритет над авто-детектом.
+    assert run_config.effective_port(8080, 3000) == 8080
+    # Явный 0 (worker) тоже приоритет — авто-детект не перебивает.
+    assert run_config.effective_port(0, 3000) == 0
+    # Порт не задан (None) → подхватываем detected (EXPOSE образа, напр. Next.js 3000).
+    assert run_config.effective_port(None, 3000) == 3000
+    # Ни явного, ни детекта → дефолт 80.
+    assert run_config.effective_port(None, None) == 80

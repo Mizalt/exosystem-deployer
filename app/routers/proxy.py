@@ -104,7 +104,7 @@ async def proxy_to_application(
     # В сетевой модели deployer-net обращаемся к контейнеру по ИМЕНИ на внутренний
     # порт приложения (по умолчанию 80, настраивается в расширенном режиме — Идея 2а).
     target_instance = _pick_round_robin(deployment.id, online_instances)
-    target_port = run_config.effective_port(deployment.internal_port)
+    target_port = run_config.effective_port(deployment.internal_port, deployment.detected_port)
     target_url = f"http://{target_instance.container_name}:{target_port}/{path}"
 
     headers = dict(request.headers)

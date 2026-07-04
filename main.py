@@ -193,7 +193,7 @@ def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)
             "online_count": online_count,
             "instances_count": len(dep.instances),
             # Расширенный режим сборки/рантайма (Идея 2а) — для UI-редактора конфига.
-            "internal_port": run_config.effective_port(dep.internal_port),
+            "internal_port": run_config.effective_port(dep.internal_port, dep.detected_port),
             "run_command": dep.run_command,
             "base_image": dep.base_image,
             "env_vars": run_config.env_from_json(dep.env_vars),
@@ -218,14 +218,21 @@ def _apply_run_config(dep, data: dict):
     Затрагивает только переданные ключи (частичное обновление), не коммитит.
     Валидирует internal_port. Пустые строки → None (вернуться к автогену/дефолту).
     """
-    if data.get("internal_port") is not None and data.get("internal_port") != "":
-        try:
-            port = int(data["internal_port"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="internal_port должен быть числом")
-        if port < 0 or port > 65535:
-            raise HTTPException(status_code=400, detail="internal_port вне диапазона 0..65535")
-        dep.internal_port = port
+    if "internal_port" in data:
+        raw = data.get("internal_port")
+        if raw is None or raw == "":
+            # Пусто → «авто»: снимаем явный порт И сброшенный детект (пересборка может
+            # изменить EXPOSE) — оркестратор передетектит из образа при следующем деплое.
+            dep.internal_port = None
+            dep.detected_port = None
+        else:
+            try:
+                port = int(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="internal_port должен быть числом")
+            if port < 0 or port > 65535:
+                raise HTTPException(status_code=400, detail="internal_port вне диапазона 0..65535")
+            dep.internal_port = port
     if "run_command" in data:
         dep.run_command = (data.get("run_command") or "").strip() or None
     if "base_image" in data:
@@ -342,7 +349,7 @@ def update_service_config_compat(service_id: int, data: dict, current_user: Curr
     db.commit()
     return {
         "message": "Конфиг применён, сервис пересоздаётся.",
-        "internal_port": run_config.effective_port(dep.internal_port),
+        "internal_port": run_config.effective_port(dep.internal_port, dep.detected_port),
         "run_command": dep.run_command,
         "base_image": dep.base_image,
         "env_vars": run_config.env_from_json(dep.env_vars),
