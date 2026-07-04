@@ -865,10 +865,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const bits = [];
                 // Человекочитаемый диагноз с бэкенда — что именно случилось и где чинить.
                 if (d.diagnosis) bits.push(`<b>${escapeHTML(d.diagnosis)}</b>`);
-                else if (d.status === 'build_failed') bits.push('⚠ Образ не собрался — причина в логе ниже.');
+                else if (d.status === 'build_failed') bits.push('<span class="material-symbols-outlined inline-ico">warning</span> Образ не собрался — причина в логе ниже.');
                 else if (d.exit_code != null) bits.push(`Контейнер завершился с кодом <span class="mono">${d.exit_code}</span>.`);
                 if (d.oom_killed) bits.push('Признак: <span class="mono">OOMKilled</span> (нехватка памяти).');
-                if (d.logs_readable === false) bits.push('⚠ Логи недоступны: logging-драйвер Docker на хосте не поддерживает чтение (нужен json-file/local) — это настройка сервера, не приложения.');
+                if (d.logs_readable === false) bits.push('<span class="material-symbols-outlined inline-ico">warning</span> Логи недоступны: logging-драйвер Docker на хосте не поддерживает чтение (нужен json-file/local) — это настройка сервера, не приложения.');
                 if (d.restart_count) bits.push(`Попыток перезапуска до отказа: ${d.restart_count}.`);
                 if (bits.length) diag.innerHTML = `<div class="diag-box">${bits.join('<br>')}</div>`;
             }
@@ -886,7 +886,9 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="detail-chain">
                 ${drawerRow('Тип', 'Приложение (публичный домен)')}
                 ${drawerRow('Домен', `<a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a>`)}
-                ${drawerRow('SSL', app.ssl_cert_name ? '🔒 ' + escapeHTML(app.ssl_cert_name) : '❌ HTTP')}
+                ${drawerRow('SSL', app.ssl_cert_name
+                    ? `<span class="material-symbols-outlined inline-ico" style="color:var(--success)">lock</span> ${escapeHTML(app.ssl_cert_name)}`
+                    : '<span class="material-symbols-outlined inline-ico" style="color:var(--text-secondary)">no_encryption</span> HTTP')}
                 ${drawerRow('Сервис', `<span class="status-dot ${svc ? svc.status : 'offline'}"></span> <span class="mono">${escapeHTML(app.service.name)}</span>${svc ? ` · :${svc.assigned_port}` : ''}`)}
                 ${drawerRow('Версия', svc ? escapeHTML(svc.artifact.version_tag) : '—')}
                 ${drawerRow('Пользователи (protected)', (app.users || []).length)}
@@ -972,7 +974,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const status = await fetchData('githubStatus', '/api/integrations/github');
             if (status.connected) {
-                statusEl.innerHTML = `<span style="color:var(--success)">✅ Подключено: <strong>${escapeHTML(status.login || '')}</strong> <span class="mono">(${escapeHTML(status.masked_token || '')})</span></span>`;
+                statusEl.innerHTML = `<span style="color:var(--success)"><span class="material-symbols-outlined inline-ico">check_circle</span> Подключено: <strong>${escapeHTML(status.login || '')}</strong> <span class="mono">(${escapeHTML(status.masked_token || '')})</span></span>`;
                 disconnectBtn.style.display = 'inline-flex';
             } else {
                 statusEl.innerHTML = `<span>Не подключено.</span>`;
@@ -1346,7 +1348,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const status = await fetchData('githubStatus', '/api/integrations/github');
             if (!status.connected) { group.style.display = 'none'; return; }
             const repos = await fetchData('githubRepos', '/api/integrations/github/repos');
-            populateSelect(select, repos, r => r.full_name + (r.private ? ' 🔒' : ''), r => r.full_name, false);
+            populateSelect(select, repos, r => r.full_name + (r.private ? ' (приватный)' : ''), r => r.full_name, false);
             group.style.display = 'block';
             if (hint) hint.innerHTML = `GitHub подключён (<strong>${escapeHTML(status.login || '')}</strong>) — доступны и приватные репозитории. Если в репозитории есть свой <span class="mono">Dockerfile</span> — соберём по нему.`;
         } catch (_) { group.style.display = 'none'; }
@@ -1492,7 +1494,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Строка приложения: DOM-узел + обработчики (scoped) — для точечного рендера.
     function buildAppRow(app) {
         const proto = app.ssl_cert_name ? 'https' : 'http';
-        const sslCell = app.ssl_cert_name ? `✅ ${escapeHTML(app.ssl_cert_name)}` : '❌ HTTP';
+        const sslCell = app.ssl_cert_name
+            ? `<span class="material-symbols-outlined inline-ico" style="color:var(--success)">lock</span> ${escapeHTML(app.ssl_cert_name)}`
+            : '<span class="material-symbols-outlined inline-ico" style="color:var(--text-secondary)">no_encryption</span> HTTP';
         const issueBtn = app.ssl_cert_name ? '' : `<button class="btn-icon-label issue-app-ssl-btn" title="Выпустить Let's Encrypt SSL"><span class="material-symbols-outlined">shield_lock</span>Выпустить SSL</button>`;
         const tpl = document.createElement('template');
         tpl.innerHTML = `<tr class="app-row clickable-row" data-app-id="${app.id}" title="Открыть детали приложения">
@@ -1631,13 +1635,14 @@ document.addEventListener('DOMContentLoaded', () => {
             clearTimeout(timer);
             const domain = input.value.trim();
             if (!domain || !domain.includes('.')) { status.className = 'dns-inline'; status.textContent = ''; return; }
-            status.className = 'dns-inline checking'; status.textContent = '⏳ Проверка DNS…';
+            const ico = name => `<span class="material-symbols-outlined inline-ico">${name}</span>`;
+            status.className = 'dns-inline checking'; status.innerHTML = `${ico('hourglass_empty')} Проверка DNS…`;
             timer = setTimeout(async () => {
                 try {
                     const d = await checkDns(domain);
-                    if (d.matches && d.warning) { status.className = 'dns-inline warn'; status.textContent = `⚠️ Указывает сюда (${d.server_ip || ''}), но есть лишние A-записи: ${(d.domain_ips||[]).filter(ip=>ip!==d.server_ip).join(', ')} — удали их, иначе SSL не выпустится`; }
-                    else if (d.matches) { status.className = 'dns-inline good'; status.textContent = `✅ Домен указывает на этот сервер (${d.server_ip || ''})`; }
-                    else { status.className = 'dns-inline bad'; status.textContent = `❌ Не указывает на сервер · домен: ${d.domain_ip || 'нет A-записи'} · сервер: ${d.server_ip || '?'}`; }
+                    if (d.matches && d.warning) { status.className = 'dns-inline warn'; status.innerHTML = `${ico('warning')} Указывает сюда (${escapeHTML(d.server_ip || '')}), но есть лишние A-записи: ${escapeHTML((d.domain_ips||[]).filter(ip=>ip!==d.server_ip).join(', '))} — удали их, иначе SSL не выпустится`; }
+                    else if (d.matches) { status.className = 'dns-inline good'; status.innerHTML = `${ico('check_circle')} Домен указывает на этот сервер (${escapeHTML(d.server_ip || '')})`; }
+                    else { status.className = 'dns-inline bad'; status.innerHTML = `${ico('error')} Не указывает на сервер · домен: ${escapeHTML(d.domain_ip || 'нет A-записи')} · сервер: ${escapeHTML(d.server_ip || '?')}`; }
                 } catch (e) { status.className = 'dns-inline'; status.textContent = ''; }
             }, 600);
         };

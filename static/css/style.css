@@ -255,6 +255,9 @@ header { padding: 24px 32px; display: flex; justify-content: space-between; alig
 
 .card-hint { color: var(--text-secondary); font-size: 14px; margin-bottom: 16px; }
 
+/* Иконка Material Symbols в строке текста (Ночь 15: эмодзи в UI запрещены). */
+.inline-ico { font-size: 15px; vertical-align: -3px; }
+
 /* === ЖИВОЙ DNS-ИНДИКАТОР В ПОЛЕ ДОМЕНА === */
 .dns-inline { font-size: 13px; margin-top: 6px; min-height: 1em; }
 .dns-inline.checking { color: var(--text-secondary); }
