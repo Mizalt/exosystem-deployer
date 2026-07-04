@@ -802,8 +802,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const diag = document.getElementById('drwDiag');
             if (diag && svc.status !== 'online') {
                 const bits = [];
-                if (d.status === 'build_failed') bits.push('⚠ Образ не собрался — причина в логе ниже.');
+                // Человекочитаемый диагноз с бэкенда — что именно случилось и где чинить.
+                if (d.diagnosis) bits.push(`<b>${escapeHTML(d.diagnosis)}</b>`);
+                else if (d.status === 'build_failed') bits.push('⚠ Образ не собрался — причина в логе ниже.');
                 else if (d.exit_code != null) bits.push(`Контейнер завершился с кодом <span class="mono">${d.exit_code}</span>.`);
+                if (d.oom_killed) bits.push('Признак: <span class="mono">OOMKilled</span> (нехватка памяти).');
+                if (d.logs_readable === false) bits.push('⚠ Логи недоступны: logging-драйвер Docker на хосте не поддерживает чтение (нужен json-file/local) — это настройка сервера, не приложения.');
                 if (d.restart_count) bits.push(`Попыток перезапуска до отказа: ${d.restart_count}.`);
                 if (bits.length) diag.innerHTML = `<div class="diag-box">${bits.join('<br>')}</div>`;
             }
