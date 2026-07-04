@@ -31,6 +31,21 @@ curl -fsSL https://raw.githubusercontent.com/Mizalt/exosystem-deployer/main/inst
 
 > Альтернатива (из исходников): `git clone … && cp .env.example .env && docker compose up -d --build`.
 
+### Рекомендуется для прода: мастер-ключ шифрования секретов
+
+Секреты at-rest (например, GitHub-токен) шифруются `SecretBox`. Если
+`DEPLOYER_MASTER_KEY` не задан, ключ автогенерируется в файл `data/master.key` —
+**в том же каталоге, что и БД**: бэкап/снапшот тома тогда содержит и шифротексты,
+и ключ к ним. Для прода задайте ключ через окружение (`.env`) и не включайте
+`data/master.key` в один бэкап с БД:
+```sh
+DEPLOYER_MASTER_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+DEPLOYER_MASTER_KEY_REQUIRED=true   # запрет тихого fallback'а на файл (fail-fast)
+```
+Если установка уже работала с файлом-ключом — перенесите в env **существующее**
+значение из `data/master.key` (новый ключ сделает старые шифротексты нечитаемыми),
+после чего файл можно удалить.
+
 ### Опционально перед стартом: контактный email для SSL
 
 Чтобы Let's Encrypt слал уведомления об истечении сертификатов, задайте в `.env`:

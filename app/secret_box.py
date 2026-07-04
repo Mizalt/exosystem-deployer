@@ -18,6 +18,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 _KEY_ENV = "DEPLOYER_MASTER_KEY"
+_KEY_REQUIRED_ENV = "DEPLOYER_MASTER_KEY_REQUIRED"
 _KEY_FILE = Path("data/master.key")
 _VERSION = "v1"
 
@@ -26,6 +27,15 @@ def _load_or_create_master_key() -> bytes:
     env_key = os.environ.get(_KEY_ENV)
     if env_key:
         return env_key.strip().encode("utf-8")
+
+    # V-04 (ADR-074): в проде мастер-ключ обязан приходить из окружения/секрет-
+    # менеджера. Файл data/master.key лежит В ТОМ ЖЕ томе, что и БД с шифротекстами —
+    # один утёкший бэкап раскрыл бы всё. Fail-fast понятнее, чем тихая деградация.
+    if os.environ.get(_KEY_REQUIRED_ENV, "false").lower() == "true":
+        raise RuntimeError(
+            f"{_KEY_ENV} не задан, а {_KEY_REQUIRED_ENV}=true (прод-режим): "
+            "мастер-ключ SecretBox должен приходить из секрет-менеджера/окружения, "
+            "а не файлом рядом с БД. Задайте ключ и перезапустите.")
 
     if _KEY_FILE.exists():
         return _KEY_FILE.read_text(encoding="utf-8").strip().encode("utf-8")
