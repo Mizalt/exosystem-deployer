@@ -84,6 +84,18 @@ def _op_metrics_isolated(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  Изоляция журнала версий (Ночь 16, ADR-085)
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _update_history_isolated(tmp_path, monkeypatch):
+    """Финализация задачи `self_update` пишет журнал в data/update_history.json —
+    из тестов перенаправляем во временный файл, чтобы не трогать дев-каталог."""
+    from app.services import self_update
+    monkeypatch.setattr(self_update, "UPDATE_HISTORY_FILE",
+                        tmp_path / "update_history.json")
+
+
+# --------------------------------------------------------------------------- #
 #  Фейковый Docker
 # --------------------------------------------------------------------------- #
 class FakeContainer:

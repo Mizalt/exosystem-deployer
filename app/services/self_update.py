@@ -103,6 +103,74 @@ def read_update_state() -> dict:
         return {}
 
 
+# --- Журнал версий + страж отката (Ночь 16, ADR-085) -------------------------- #
+
+UPDATE_HISTORY_FILE = config.BASE_DIR / "data" / "update_history.json"
+HISTORY_MAX_ENTRIES = 50
+
+
+def read_update_history() -> list[dict]:
+    """Журнал обновлений/откатов (старые → новые). Пишет финализация задачи
+    `self_update` (НОВЫЙ процесс после свопа — он знает свою версию). Пусто —
+    нода ни разу не обновлялась через ЛК (или обновлялась руками мимо журнала)."""
+    try:
+        data = json.loads(UPDATE_HISTORY_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def append_update_history(entry: dict) -> None:
+    """Дописывает запись журнала (best-effort: журнал не важнее самого обновления)."""
+    try:
+        history = read_update_history()
+        history.append(entry)
+        UPDATE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        UPDATE_HISTORY_FILE.write_text(
+            json.dumps(history[-HISTORY_MAX_ENTRIES:], ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: [self-update] журнал версий не записан: {e}")
+
+
+def rollback_target_version() -> str | None:
+    """Версия, на которую вернёт откат (`previous_ref`), — из журнала.
+
+    `previous_ref` выставляется ТОЛЬКО успешным обновлением, поэтому версия цели
+    отката = `from_version` последней записи со статусом `updated`. None — журнала
+    нет (обновляли руками/до Ночи 16): версия цели неизвестна.
+    """
+    if not read_update_state().get("previous_ref"):
+        return None
+    for entry in reversed(read_update_history()):
+        if entry.get("status") == "updated":
+            return entry.get("from_version") or None
+    return None
+
+
+def rollback_guard() -> tuple[bool, str | None, str | None]:
+    """Страж несовместимого отката → (allowed, target_version, reason).
+
+    Миграции forward-only: откат ниже `MIN_COMPATIBLE_VERSION` запрещён с
+    объяснением (например, ниже 0.11.0 нода теряет сам механизм обновления).
+    Версия цели неизвестна (нет журнала) → пропускаем с пометкой: откат —
+    инструмент восстановления, блокировать его без доказательств опаснее.
+    """
+    from app import version as version_mod
+
+    state = read_update_state()
+    if not state.get("previous_ref"):
+        return False, None, "Нет сохранённой предыдущей версии (нода ещё не обновлялась через ЛК)."
+    target = rollback_target_version()
+    if target and (version_mod.as_tuple(target)
+                   < version_mod.as_tuple(version_mod.MIN_COMPATIBLE_VERSION)):
+        return False, target, (
+            f"Откат на v{target} запрещён: ниже минимально совместимой "
+            f"v{version_mod.MIN_COMPATIBLE_VERSION}. Миграции ноды forward-only — "
+            "старая версия не умеет обновляться из ЛК и не поймёт новую схему данных.")
+    return True, target, None
+
+
 def _self_container(client):
     try:
         return client.containers.get(SELF_CONTAINER)

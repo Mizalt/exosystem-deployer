@@ -326,6 +326,10 @@ def _handle_self_update(db, action) -> None:
             return
         params["started"] = True
         params["started_ts"] = time.time()  # для замера self_update и ETA (Ночь 14)
+        # Версия ДО свопа — для журнала истории версий (Ночь 16, ADR-085): после
+        # успешного свопа задачу финализирует уже НОВЫЙ процесс с новой версией.
+        from app import version as version_mod
+        params["started_version"] = version_mod.get_version()
         _store(action, params)
         _append_log(action, "Updater запущен: build-first, при провале health — авто-откат. "
                             "Панель может быть недоступна несколько секунд в момент переключения.")
@@ -358,24 +362,104 @@ def _handle_self_update(db, action) -> None:
                               duration_seconds=round(time.time() - started, 1),
                               outcome=outcome, db=db)
 
+    def _journal(status: str) -> None:
+        """Запись в журнал версий (Ночь 16, ADR-085) — сырьё модалки «Версии» в ЛК.
+        `to_version` = версия ЭТОГО процесса: после успешного свопа финализирует
+        уже новый код, при откате/провале — прежний (from == to)."""
+        from app import version as version_mod
+        state = self_update.read_update_state()
+        self_update.append_update_history({
+            "at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ref": params.get("ref"),
+            "from_version": params.get("started_version"),
+            "to_version": version_mod.get_version(),
+            "status": status,
+            "current_ref": state.get("current_ref"),
+            "failed_ref": state.get("failed_ref"),
+        })
+
     if code == 0:
         if "ALREADY_UP_TO_DATE" in logs:
-            # Без замера: «уже актуально» — не обновление, испортило бы среднее ETA.
+            # Без замера и журнала: «уже актуально» — ничего не менялось.
             _done(action, "Уже актуальная версия — обновление не потребовалось.")
             return
         cur = (self_update.read_update_state().get("current_ref") or "")[:12]
         _measure("done")
+        _journal("updated")
         _done(action, f"Обновление применено{' (' + cur + ')' if cur else ''}.")
     elif code == 3:
         _measure("error")
+        _journal("build_failed")
         _fail(action, "Сборка новой версии провалилась — работающая версия не тронута (build-first).")
     elif code == 42:
         _measure("error")
+        _journal("rolled_back")
         _fail(action, "Новая версия не прошла проверку здоровья — выполнен автоматический "
                       "откат на прежнюю версию.")
     else:
         _measure("error")
+        _journal("error")
         _fail(action, f"Updater завершился с кодом {code} — подробности в журнале выше.")
+
+
+def _handle_ssl_renew(db, action) -> None:
+    """Автопродление сертификата (Ночь 16, ADR-085). Задачу ставит часовой чекер
+    `ssl_renewal.sweep_once` за ~30 дней до истечения; здесь — сами попытки.
+
+    Успех = срок серта РЕАЛЬНО сдвинулся (сравниваем not_after до/после certbot:
+    файлы при продлении заменяются на месте, «серт существует» ничего не докажет).
+    Не удаётся, а осталось ≤14 дней → error с громким текстом — это алерт центра
+    задач, он зеркалится в ЛК и триггерит письмо владельцу. Чекер поставит новую
+    задачу через сутки — попытки не прекращаются до самого истечения.
+    """
+    from app.services import ssl_renewal
+
+    params = _load(action)
+    cert = params["cert"]
+    expiry = ssl_renewal.cert_expiry(cert)
+    if expiry is None:
+        _fail(action, f"Сертификат «{cert}» исчез с диска — продлевать нечего "
+                      "(удалён вручную?).")
+        return
+    left = ssl_renewal.days_left(expiry)
+    if left > ssl_renewal.RENEW_BEFORE_DAYS:
+        _done(action, f"Сертификат уже продлён — действует до {expiry:%d.%m.%Y}.")
+        return
+
+    if not params.get("renewable", True):
+        # Загруженный вручную серт: LE его не выпускал — продлить не можем, только
+        # честно предупреждаем заранее (владелец должен загрузить обновлённый).
+        _fail(action, f"Сертификат «{cert}» загружен вручную и истекает "
+                      f"{expiry:%d.%m.%Y} (через {int(left)} дн.). Автопродление "
+                      "невозможно — загрузите обновлённый сертификат на странице SSL.")
+        return
+
+    # Для LE-сертификатов имя лineage = домен (так их создают наши потоки выпуска).
+    _append_log(action, f"Продлеваю сертификат {cert} (истекает через {int(left)} дн.)…")
+    started = time.time()
+    ok, ssl_log = issue_certificate(cert)
+    _append_log(action, ssl_log)
+    new_expiry = ssl_renewal.cert_expiry(cert)
+    renewed = bool(ok and new_expiry and new_expiry > expiry)
+    op_metrics.record("ssl_renew", subject=cert,
+                      duration_seconds=round(time.time() - started, 1),
+                      outcome="done" if renewed else "error", db=db)
+    if renewed:
+        _done(action, f"Сертификат продлён — действует до {new_expiry:%d.%m.%Y}.")
+        return
+
+    if left <= ssl_renewal.ALERT_DAYS:
+        _fail(action, f"Не удаётся продлить SSL для «{cert}» — истекает "
+                      f"{expiry:%d.%m.%Y} (через {int(left)} дн.)! Проверьте, что "
+                      "A-запись домена указывает на этот сервер и открыт 80-й порт. "
+                      "Автопопытки продолжатся; можно нажать «Повторить» после починки.")
+        return
+    attempts = params.get("renew_attempts", 0) + 1
+    params["renew_attempts"] = attempts
+    _store(action, params)
+    _append_log(action, f"Продление не удалось (попытка {attempts}) — повторю через "
+                        f"{ssl_renewal.RETRY_SECONDS // 3600} ч.")
+    action.next_check_at = _due_in(ssl_renewal.RETRY_SECONDS)
 
 
 HANDLERS = {
@@ -383,6 +467,7 @@ HANDLERS = {
     "issue_ssl": _handle_issue_ssl,
     "panel_ssl": _handle_panel_ssl,
     "self_update": _handle_self_update,
+    "ssl_renew": _handle_ssl_renew,
 }
 
 
@@ -393,6 +478,7 @@ STAGE_LABELS = {
     "dns_wait": "Ожидание распространения DNS",
     "ssl_issue": "Выпуск сертификата",
     "self_update": "Обновление деплоера",
+    "ssl_renew": "Продление SSL-сертификата",
 }
 
 # Честная вилка для непредсказуемой фазы (провайдер DNS вне нашего контроля) —
@@ -419,6 +505,13 @@ def describe_stage(db, action, stats: dict | None = None) -> dict | None:
             eta = max(round(avg - elapsed), 15)
         return {"stage": "self_update", "stage_label": STAGE_LABELS["self_update"],
                 "eta_seconds": eta, "unpredictable": False}
+
+    if action.type == "ssl_renew":
+        # Механика продления = прогон certbot; ETA честно берём из замеров выпуска
+        # (собственные ssl_renew-замеры редки — раз в ~60 дней на серт).
+        return {"stage": "ssl_renew", "stage_label": STAGE_LABELS["ssl_renew"],
+                "eta_seconds": op_metrics.avg_seconds(db, "ssl_issue", stats=stats),
+                "unpredictable": False}
 
     if action.type in ("publish_on_dns", "issue_ssl", "panel_ssl"):
         if action.type == "publish_on_dns" and not params.get("app_id"):

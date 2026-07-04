@@ -16,7 +16,14 @@ from app import editions
 
 # Semver сборки деплоера. Бампать при значимых изменениях API/поведения. На проде
 # может переопределяться env `DEPLOYER_VERSION` (напр. проставляется при сборке образа).
-VERSION = "0.13.1"
+VERSION = "0.14.0"
+
+# Минимальная версия, на которую БЕЗОПАСЕН откат из UI (страж даунгрейда, Ночь 16,
+# ADR-085). Миграции ноды forward-only: ниже 0.11.0 нет самого механизма
+# обновления (updater-джоба + задача self_update, ADR-071) — откат туда лишает
+# ноду возможности обновиться обратно из ЛК (только руками по SSH). Бампать при
+# несовместимых изменениях схемы/контрактов.
+MIN_COMPATIBLE_VERSION = "0.11.0"
 
 # Capabilities ЭТОЙ сборки — стабильные строки-фичи. Список ТОЛЬКО пополняем
 # (аддитивно): существующие строки не переименовываем и не удаляем, иначе старые
@@ -35,7 +42,25 @@ CAPABILITIES = (
     "self_update",      # самообновление/откат: POST /api/admin/{update,rollback} (cpk, ADR-071)
     "host_health",      # здоровье хоста: GET /api/host/health (диск/RAM/swap/load, Ночь 13)
     "op_metrics",       # замеры операций: GET /api/operation-metrics + стадии/ETA задач (Ночь 14)
+    "ssl_renewal",      # автопродление SSL + GET /api/ssl/expiring (алерты сроков, Ночь 16)
+    "update_info",      # история версий + страж отката: GET /api/admin/update-info (Ночь 16)
 )
+
+
+def as_tuple(v: str | None) -> tuple[int, ...]:
+    """Semver-строка → кортеж для сравнения («0.13.1» < «0.14.0»). Терпима к мусору:
+    нечисловые куски отбрасываются, пусто → (0,) (сравнение не падает никогда)."""
+    parts = []
+    for chunk in (v or "").strip().lstrip("v").split("."):
+        digits = ""
+        for ch in chunk:  # только ведущие цифры сегмента: «0-rc1» → 0
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) or (0,)
 
 
 def get_version() -> str:

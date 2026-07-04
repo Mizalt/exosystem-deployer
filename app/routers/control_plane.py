@@ -18,16 +18,20 @@ import json
 import secrets
 from datetime import timedelta
 
+from typing import Annotated
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
-from app import crud, security
+from app import crud, models, security
 from app.database import get_db
 from app.services import control_plane
 
 router = APIRouter(tags=["Control plane"])
+
+CurrentUser = Annotated[models.User, Depends(security.get_current_user)]
 
 
 class CpkTokenIn(BaseModel):
@@ -114,12 +118,40 @@ def admin_update(data: UpdateIn, db: Session = Depends(get_db)):
 
 @router.post("/api/admin/rollback")
 def admin_rollback(data: CpkTokenIn, db: Session = Depends(get_db)):
-    """Откат на предыдущую версию (из `data/update_state.json`, пишет updater)."""
+    """Откат на предыдущую версию (из `data/update_state.json`, пишет updater).
+
+    Ночь 16 (ADR-085): страж несовместимого отката — цель ниже
+    `MIN_COMPATIBLE_VERSION` (forward-only миграции) отклоняется с объяснением.
+    """
     _verified_payload(data.token, "rollback")
     from app.services import self_update
 
-    prev = self_update.read_update_state().get("previous_ref")
-    if not prev:
-        raise HTTPException(status_code=409,
-                            detail="Нет сохранённой предыдущей версии (нода ещё не обновлялась через ЛК).")
+    allowed, _target, reason = self_update.rollback_guard()
+    if not allowed:
+        raise HTTPException(status_code=409, detail=reason)
+    prev = self_update.read_update_state()["previous_ref"]
     return _enqueue_self_update(db, prev, f"Откат деплоера → {prev[:12]}")
+
+
+@router.get("/api/admin/update-info")
+def update_info(current_user: CurrentUser):
+    """История версий ноды + состояние отката (Ночь 16, ADR-085) — сырьё модалки
+    «Версии» в ЛК (capability `update_info`). Read-only, под панельной авторизацией
+    (M2M-креды ЛК; мутаций нет — cpk-подпись не требуется)."""
+    from app import version as version_mod
+    from app.services import self_update
+
+    state = self_update.read_update_state()
+    allowed, target, reason = self_update.rollback_guard()
+    return {
+        "version": version_mod.get_version(),
+        "git_sha": version_mod.git_sha(),
+        "min_compatible_version": version_mod.MIN_COMPATIBLE_VERSION,
+        "update_state": state,
+        # Новые записи первыми — модалка показывает журнал сверху вниз по времени.
+        "history": list(reversed(self_update.read_update_history()))[:20],
+        "rollback": {"available": bool(state.get("previous_ref")),
+                     "target_version": target,
+                     "allowed": allowed,
+                     "reason": reason},
+    }

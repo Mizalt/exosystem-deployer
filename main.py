@@ -43,6 +43,7 @@ from app.services.ws_manager import manager as ws_manager
 import asyncio
 from app.services.orchestrator import run_orchestrator_loop
 from app.services.pending_actions import run_pending_actions_loop
+from app.services.ssl_renewal import run_ssl_renewal_loop
 
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -96,6 +97,8 @@ async def lifespan(app: FastAPI):
     orchestrator_task = asyncio.create_task(run_orchestrator_loop())
     # Фоновый чекер долгих операций (публикация/SSL/DNS) — Ночь 10, ADR-069.
     pending_task = asyncio.create_task(run_pending_actions_loop())
+    # Часовой чекер сроков сертификатов → задачи автопродления (Ночь 16, ADR-085).
+    ssl_renewal_task = asyncio.create_task(run_ssl_renewal_loop())
     print("SUCCESS: Infrastructure ready and Orchestrator started.")
 
     yield
@@ -103,7 +106,9 @@ async def lifespan(app: FastAPI):
     print("--- Running shutdown tasks ---")
     orchestrator_task.cancel()
     pending_task.cancel()
-    for task, label in ((orchestrator_task, "Orchestrator"), (pending_task, "Pending-actions")):
+    ssl_renewal_task.cancel()
+    for task, label in ((orchestrator_task, "Orchestrator"), (pending_task, "Pending-actions"),
+                        (ssl_renewal_task, "SSL-renewal")):
         try:
             await task
         except asyncio.CancelledError:

@@ -43,7 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     <button class="tab" data-tab="upload"><span class="material-symbols-outlined">upload</span>Загрузить свой</button>
                 </div>
                 <div class="tab-panel active" data-panel="certs">
-                    <div class="settings-card"><table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div>
+                    <div class="settings-card">
+                        <p class="card-hint">Let's Encrypt-сертификаты продлеваются автоматически за ~30 дней до истечения. Если продлить не удаётся, за 14 дней появится алерт в центре задач.</p>
+                        <table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table>
+                    </div>
                 </div>
                 <div class="tab-panel" data-panel="issue">
                     <div class="settings-card" style="max-width:560px;">
@@ -1618,7 +1621,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = { name: appName, domain, service_id: serviceId, ssl_cert_name: mode === 'existing' ? (raw.ssl_cert_name || null) : null };
         await postJSON(form, '/api/applications', data, `Приложение опубликовано! Доступно: ${data.ssl_cert_name ? 'https' : 'http'}://${domain}`, () => { hideModal('applicationModal'); invalidateCache('applications'); loadAndDisplayApplications(); });
     }
-    async function loadAndDisplayCerts() { const tableBody = document.querySelector('#certsTable tbody'); try { const certs = await fetchData('certs', '/api/ssl/certificates'); if (certs.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-secondary);">Сертификаты не найдены.</td></tr>`; return; } tableBody.innerHTML = certs.map(cert => `<tr><td><span class="mono">${escapeHTML(cert.name)}</span></td><td>${escapeHTML(cert.subject)}</td><td>${new Date(cert.not_after).toLocaleDateString()}</td><td><button class="icon-btn danger" data-cert-name="${escapeHTML(cert.name)}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-cert-name]').forEach(btn => { btn.onclick = () => handleCertDelete(btn.dataset.certName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="4" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
+    // Срок серта в UI (Ночь 16, ADR-085): дата + «через N дн.» с подсветкой
+    // (≤14 — красный алерт, ≤30 — жёлтый «продлевается»), ручные серты — пометка.
+    function certValidityCell(cert) {
+        const date = new Date(cert.not_after).toLocaleDateString();
+        const d = cert.days_left;
+        if (d === null || d === undefined) return date;
+        let color = 'var(--text-secondary)', note = `через ${d} дн.`;
+        if (d <= 14) { color = 'var(--danger)'; note = `через ${d} дн. — истекает!`; }
+        else if (d <= 30) { color = 'var(--warning, #fbbc04)'; note = cert.auto_renew ? `через ${d} дн. — продлевается` : `через ${d} дн.`; }
+        const manual = cert.auto_renew ? '' : ` <span style="color:var(--text-secondary)">· ручной</span>`;
+        return `${date} <span style="color:${color}">(${note})</span>${manual}`;
+    }
+    async function loadAndDisplayCerts() { const tableBody = document.querySelector('#certsTable tbody'); try { const certs = await fetchData('certs', '/api/ssl/certificates'); if (certs.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-secondary);">Сертификаты не найдены.</td></tr>`; return; } tableBody.innerHTML = certs.map(cert => `<tr><td><span class="mono">${escapeHTML(cert.name)}</span></td><td>${escapeHTML(cert.subject)}</td><td>${certValidityCell(cert)}</td><td><button class="icon-btn danger" data-cert-name="${escapeHTML(cert.name)}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-cert-name]').forEach(btn => { btn.onclick = () => handleCertDelete(btn.dataset.certName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="4" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
     async function checkDns(domain) {
         const response = await fetch(`/api/ssl/check-dns?domain=${encodeURIComponent(domain)}`, { headers: { 'Authorization': `Bearer ${getToken()}` } });
         if (response.status === 401) { clearToken(); showLoginScreen(); throw new Error('Session expired'); }
