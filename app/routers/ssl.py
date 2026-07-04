@@ -13,10 +13,13 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from datetime import datetime
 
+from sqlalchemy.orm import Session
+
 from app.config import SSL_DIR
 from pydantic import BaseModel
+from app.database import get_db
 from app.schemas import IssueSSLRequest
-from app.services import nginx_manager
+from app.services import nginx_manager, ssl_renewal
 from app.services.ws_manager import manager
 from app.services.ssl_service import perform_ssl_issuance
 # --- ИМПОРТЫ ДЛЯ АУТЕНТИФИКАЦИИ ---
@@ -28,7 +31,14 @@ router = APIRouter(prefix="/api/ssl", tags=["ssl"])
 # отключаем (раньше было verify=False без причины).
 http_client = httpx.AsyncClient()
 
-class SSLCertificateInfo(BaseModel): name: str; subject: str; not_after: datetime
+class SSLCertificateInfo(BaseModel):
+    name: str
+    subject: str
+    not_after: datetime
+    # Ночь 16 (ADR-085): сколько дней осталось (UI подсвечивает ≤30/≤14) и
+    # продлеваем ли сами (LE — да; загруженный вручную — только предупреждаем).
+    days_left: int | None = None
+    auto_renew: bool = True
 class DnsCheckResponse(BaseModel): domain: str; server_ip: str | None; domain_ip: str | None; domain_ips: list[str] = []; matches: bool; warning: str | None = None; error: str | None
 
 
@@ -101,9 +111,25 @@ async def list_ssl_certificates(current_user: CurrentUser):
                 cert_path = chain_files[-1]; cert_name = item.name
                 cert = x509.load_pem_x509_certificate(cert_path.read_bytes(), default_backend())
                 subject_cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-                certs.append(SSLCertificateInfo(name=cert_name, subject=subject_cn, not_after=cert.not_valid_after_utc))
+                certs.append(SSLCertificateInfo(
+                    name=cert_name, subject=subject_cn, not_after=cert.not_valid_after_utc,
+                    days_left=int(ssl_renewal.days_left(cert.not_valid_after_utc)),
+                    auto_renew=ssl_renewal.is_letsencrypt(cert_name)))
             except Exception as e: print(f"ERROR: Failed to parse certificate in archive {item.name}: {e}")
     return sorted(certs, key=lambda c: c.name)
+
+
+@router.get("/expiring")
+async def list_expiring_certificates(current_user: CurrentUser,
+                                     db: Session = Depends(get_db)):
+    """Сертификаты В РАБОТЕ (приложения+панель), истекающие ≤30 дней (Ночь 16).
+
+    Зеркалится в ЛК (capability `ssl_renewal` → `Deployer.ssl_alerts`): status
+    `alert` (≤14 дн.) триггерит там письмо владельцу. Пустой список — всё в порядке.
+    """
+    return {"items": ssl_renewal.expiring_report(db),
+            "renew_before_days": ssl_renewal.RENEW_BEFORE_DAYS,
+            "alert_days": ssl_renewal.ALERT_DAYS}
 
 @router.post("/certificates")
 # ИСПРАВЛЕНИЕ: Перемещаем current_user перед параметрами Form/File
