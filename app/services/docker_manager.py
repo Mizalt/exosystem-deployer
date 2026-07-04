@@ -391,13 +391,63 @@ def restart_container(container):
     container.restart()
 
 
+# Сообщение Docker при попытке прочитать логи, когда на хосте выбран
+# logging-драйвер без поддержки чтения (syslog/journald-конфиг/gelf/fluentd/none и т.п.).
+# Это НЕ ошибка приложения — это конфигурация хоста (см. docs/21_HOST_OPS.md).
+_LOG_DRIVER_UNSUPPORTED = "configured logging driver does not support reading"
+
+LOG_DRIVER_HELP = (
+    "⚠️ Логи контейнера недоступны для чтения: на этом сервере Docker настроен с "
+    "logging-драйвером, который не поддерживает `docker logs` (нужен json-file или "
+    "local). Это конфигурация ХОСТА, а не ошибка приложения. Как починить: задать в "
+    "/etc/docker/daemon.json  \"log-driver\": \"json-file\" (с ротацией max-size), "
+    "перезапустить Docker и пересоздать контейнер. Подробности — docs/21_HOST_OPS.md."
+)
+
+
+def log_driver_unsupported(exc: Exception) -> bool:
+    """True, если ошибка — это «logging-драйвер хоста не поддерживает чтение логов»."""
+    return _LOG_DRIVER_UNSUPPORTED in str(exc)
+
+
 def get_container_logs(container, tail=100) -> str:
-    """Получает последние N строк логов контейнера."""
+    """Последние N строк логов контейнера — с человекочитаемой классификацией сбоя.
+
+    Если хост настроен с logging-драйвером без чтения (`docker logs` не работает),
+    возвращаем понятное объяснение вместо сырого `500 Server Error…`, чтобы панель
+    показывала ПРИЧИНУ, а не «Could not retrieve logs» (запрос диагностируемости)."""
     try:
-        logs = container.logs(tail=tail).decode('utf-8', errors='ignore')
-        return logs
+        return container.logs(tail=tail).decode('utf-8', errors='ignore')
     except Exception as e:
-        return f"Could not retrieve logs: {e}"
+        if log_driver_unsupported(e):
+            return LOG_DRIVER_HELP
+        return f"Не удалось получить логи контейнера: {e}"
+
+
+def get_container_diagnostics(container) -> dict:
+    """Разбор состояния мёртвого/зависшего контейнера для панели (диагностируемость).
+
+    Достаёт из `State`/`HostConfig` человекочитаемые факты, которых раньше UI не видел:
+    код выхода, OOM-kill (нехватка памяти), текст ошибки рантайма Docker, тип
+    logging-драйвера и признак «logs недоступны». Best-effort — любой сбой не роняет
+    вызывающего (возвращаем пустые поля)."""
+    out = {"exit_code": None, "oom_killed": False, "state_error": None,
+           "log_driver": None, "logs_readable": True, "restarting": False}
+    try:
+        container.reload()
+        state = container.attrs.get("State", {}) or {}
+        out["exit_code"] = state.get("ExitCode")
+        out["oom_killed"] = bool(state.get("OOMKilled"))
+        out["state_error"] = (state.get("Error") or "").strip() or None
+        out["restarting"] = bool(state.get("Restarting"))
+        log_cfg = (container.attrs.get("HostConfig", {}) or {}).get("LogConfig", {}) or {}
+        driver = log_cfg.get("Type")
+        out["log_driver"] = driver
+        # json-file/local поддерживают чтение; прочие (syslog/journald-cfg/gelf/…) — нет.
+        out["logs_readable"] = driver in (None, "json-file", "local", "")
+    except Exception:  # noqa: BLE001 — диагностика не должна падать
+        pass
+    return out
 
 
 def get_container_stats(container) -> dict:

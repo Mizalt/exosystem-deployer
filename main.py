@@ -473,21 +473,50 @@ def get_service_logs_compat(service_id: int, current_user: CurrentUser, db: Sess
     payload = {
         "status": inst.status, "exit_code": inst.exit_code,
         "restart_count": inst.restart_count or 0, "logs": "",
+        "oom_killed": False, "log_driver": None, "logs_readable": True,
+        "state_error": None, "diagnosis": None,
     }
     try:
         client = get_docker_client()
         container = client.containers.get(inst.container_name)
-        try:
-            container.reload()
-            if payload["exit_code"] is None:
-                payload["exit_code"] = container.attrs.get("State", {}).get("ExitCode")
-        except Exception:
-            pass
+        diag = docker_manager.get_container_diagnostics(container)
+        if payload["exit_code"] is None:
+            payload["exit_code"] = diag["exit_code"]
+        payload.update({k: diag[k] for k in
+                        ("oom_killed", "log_driver", "logs_readable", "state_error")})
         payload["logs"] = docker_manager.get_container_logs(container, tail=200)
     except Exception:
         # Контейнер недоступен/удалён — отдаём сохранённый при падении снимок.
         payload["logs"] = inst.last_logs or "Логи недоступны (контейнер удалён)."
+    payload["diagnosis"] = _diagnose_service(payload)
     return JSONResponse(content=payload)
+
+
+def _diagnose_service(p: dict) -> str | None:
+    """Одна человекочитаемая строка «что случилось» — классифицирует сбой для UI.
+
+    Отделяет проблему ПРИЛОЖЕНИЯ (вышло/упало) от проблемы ХОСТА (logging-драйвер) и
+    от нехватки ресурсов (OOM), чтобы пользователь понимал, где чинить (запрос
+    диагностируемости). Порядок — от самого «жёсткого» сигнала к мягкому."""
+    if p.get("status") == "build_failed":
+        return "Образ не собрался — причина в логе сборки ниже. Это ошибка сборки/Dockerfile."
+    if p.get("oom_killed"):
+        return ("Контейнер убит по нехватке памяти (OOM). Приложению не хватило RAM — "
+                "уменьшите потребление, добавьте swap или возьмите сервер побольше.")
+    if p.get("state_error"):
+        return f"Docker не смог запустить контейнер: {p['state_error']}"
+    if p.get("exit_code") == 0 and p.get("status") in ("failed", "restarting", "starting", "offline"):
+        return ("Контейнер запустился и СРАЗУ завершился с кодом 0 — процесс не остался "
+                "работать как сервис (веб-сервер должен держать порт в foreground, не "
+                "уходить в фон и не выходить сам). Проверьте команду запуска/entrypoint "
+                "приложения. Это поведение приложения, а не деплоера.")
+    if p.get("exit_code") not in (None, 0):
+        return (f"Контейнер завершился с кодом {p['exit_code']} — приложение упало на "
+                "старте. Причина обычно в логе ниже (отсутствует зависимость/переменная "
+                "окружения/неверная команда).")
+    if p.get("logs_readable") is False:
+        return None  # объяснение уже в самом теле логов (LOG_DRIVER_HELP)
+    return None
 
 
 @app.get("/api/services/{service_id}/stats", tags=["Services Compatibility Layer"])
