@@ -57,7 +57,7 @@ def sso_redeem(data: CpkTokenIn, db: Session = Depends(get_db)):
     payload = _verified_payload(data.token, "sso")
     user = _subject_user(db, payload)
     access_token = security.create_access_token(
-        data={"sub": user.username},
+        data=security.user_token_claims(user),
         expires_delta=timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -73,6 +73,9 @@ def admin_recover(data: CpkTokenIn, db: Session = Depends(get_db)):
     user = _subject_user(db, payload)
     new_password = secrets.token_urlsafe(12)
     user.hashed_password = security.get_password_hash(new_password)
+    # V-05: инвалидируем все ранее выданные токены (утёкший/украденный токен не
+    # переживёт восстановление доступа).
+    user.token_version = (user.token_version or 1) + 1
     db.commit()
     print(f"INFO: control-plane recover: пароль пользователя '{user.username}' перевыпущен по подписи ЛК.")
     return {"username": user.username, "password": new_password}

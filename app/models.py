@@ -11,6 +11,11 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
+    # Версия токенов (V-05): входит в JWT-claim `ver`. Смена пароля / admin-recover
+    # инкрементит её → все ранее выданные токены становятся недействительными.
+    # nullable=True: авто-миграция ADD COLUMN не ставит DEFAULT старым строкам, код
+    # коалесит None → 1 (см. app/security.get_current_user).
+    token_version = Column(Integer, default=1, nullable=True)
 
 
 # --- УРОВЕНЬ 1: ЛОГИКА И КОД ---

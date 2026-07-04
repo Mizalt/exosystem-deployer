@@ -9,6 +9,7 @@ from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 from app import crud, run_config
 from app.database import get_db
+from app.rate_limit import LoginRateLimiter
 
 # Hop-by-hop заголовки (RFC 2616 §13.5.1) — не проксируем: их смысл только для одного
 # соединения. transfer-encoding убираем особенно: httpx уже снял chunked-framing, а
@@ -27,6 +28,11 @@ http_client = httpx.AsyncClient(timeout=60.0)
 # (stateful/replicas=1 — отдельный режим, см. ADR-018, Идея 5).
 _rr_counters: dict[int, int] = {}
 _rr_lock = threading.Lock()
+
+# Анти-брутфорс basic-auth проксируемых приложений (V-08). Публичная точка входа
+# (доступна из интернета) — без троттлинга пароли app-пользователей перебираются
+# свободно. Свой лимитер (счётчики приложений не мешаются с логином панели/ЛК).
+app_auth_limiter = LoginRateLimiter()
 
 
 def _pick_round_robin(deployment_id: int, instances: list):
@@ -67,11 +73,22 @@ async def proxy_to_application(
         try:
             auth_decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
             username, password = auth_decoded.split(":", 1)
-            user_in_db = crud.get_app_user_by_username(db, application.id, username)
-            if not user_in_db or not crud.verify_password(password, user_in_db.hashed_password):
-                return Response("Invalid credentials", status_code=401, headers={"WWW-Authenticate": "Basic"})
         except Exception:
             return Response("Invalid auth header", status_code=401, headers={"WWW-Authenticate": "Basic"})
+
+        # Анти-брутфорс (V-08): лимит по IP клиента и по (приложение+имя пользователя).
+        ip = request.client.host if request.client else "unknown"
+        limit_keys = [f"ip:{ip}", f"appuser:{app_name}:{username}"]
+        wait = app_auth_limiter.retry_after(limit_keys)
+        if wait > 0:
+            return Response("Too many attempts", status_code=429,
+                            headers={"Retry-After": str(wait)})
+
+        user_in_db = crud.get_app_user_by_username(db, application.id, username)
+        if not user_in_db or not crud.verify_password(password, user_in_db.hashed_password):
+            app_auth_limiter.record_failure(limit_keys)
+            return Response("Invalid credentials", status_code=401, headers={"WWW-Authenticate": "Basic"})
+        app_auth_limiter.reset(limit_keys)  # успех — сбрасываем счётчик
 
     # 3. Находим деплой, на который указывает приложение
     deployment = application.deployment

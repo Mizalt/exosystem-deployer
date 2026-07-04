@@ -103,4 +103,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = crud.get_user_by_username(db, username=token_data.username)
     if user is None:
         raise credentials_exception
+    # V-05: токен действителен только для текущей версии токенов пользователя. После
+    # admin-recover/смены пароля версия инкрементится → старые токены отклоняются.
+    # Токены без claim `ver` (легаси, до фичи) считаем версией 1 — апгрейд не разлогинит.
+    token_ver = payload.get("ver", 1)
+    if (user.token_version or 1) != token_ver:
+        raise credentials_exception
     return user
+
+
+def user_token_claims(user) -> dict:
+    """Claim'ы панельного JWT для пользователя (V-05: включает версию токенов)."""
+    return {"sub": user.username, "ver": user.token_version or 1}

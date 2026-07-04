@@ -176,3 +176,20 @@ def test_proxy_connect_error_502(proxy_env, monkeypatch):
     monkeypatch.setattr(proxy, "http_client", FakeHttp())
     r = client.get("/api/proxy/app/")
     assert r.status_code == 502
+
+
+def test_proxy_basic_auth_rate_limited(proxy_env, monkeypatch):
+    """V-08: перебор пароля app-пользователя ловится лимитером → 429 после N неудач."""
+    Session, client = proxy_env
+    _seed_app(Session, with_user=True)
+
+    from app.routers import proxy
+    from app.rate_limit import LoginRateLimiter
+    monkeypatch.setattr(proxy, "app_auth_limiter", LoginRateLimiter(max_fails=3, window=300))
+
+    tok = base64.b64encode(b"bob:wrong").decode()
+    for _ in range(3):
+        assert client.get("/api/proxy/app/", headers={"Authorization": f"Basic {tok}"}).status_code == 401
+    r = client.get("/api/proxy/app/", headers={"Authorization": f"Basic {tok}"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
