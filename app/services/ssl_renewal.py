@@ -80,6 +80,23 @@ def days_left(expiry: datetime) -> float:
     return (_as_aware(expiry) - _utcnow()).total_seconds() / 86400
 
 
+def days_phrase(days: float) -> str:
+    """Человекочитаемый срок: «истекает через N дн.» / «истёк N дн. назад».
+
+    Просроченный сертификат не должен «истекать через -104 дн.» — при
+    отрицательном остатке считаем дни назад (тексты задач ssl_renew, лог чекера)."""
+    n = int(days)
+    return f"истёк {-n} дн. назад" if n < 0 else f"истекает через {n} дн."
+
+
+def expiry_text(expiry: datetime, days: float) -> str:
+    """То же с датой: «истекает 22.03.2026 (через N дн.)» / «истёк 22.03.2026 (N дн. назад)»."""
+    n = int(days)
+    if n < 0:
+        return f"истёк {expiry:%d.%m.%Y} ({-n} дн. назад)"
+    return f"истекает {expiry:%d.%m.%Y} (через {n} дн.)"
+
+
 def certificates_in_use(db) -> list[dict]:
     """Сертификаты, которыми реально пользуются: приложения + домен панели.
 
@@ -171,7 +188,7 @@ def sweep_once() -> int:
                     "uses": cert["uses"],
                 }, ensure_ascii=False))
             created += 1
-            print(f"[SSL-RENEW] сертификат «{name}» истекает через {int(d)} дн. — "
+            print(f"[SSL-RENEW] сертификат «{name}» {days_phrase(d)} — "
                   f"задача продления поставлена ({'LE' if renewable else 'ручной'}).")
     finally:
         db.close()

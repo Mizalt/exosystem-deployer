@@ -256,3 +256,15 @@ class IssueSslAsyncRequest(BaseModel):
 
 class PanelSslAsyncRequest(BaseModel):
     domain: DomainStr
+
+
+# --- Веб-терминал «для знатоков» (ADR-090) ---
+
+class TerminalCommandIn(BaseModel):
+    """Одна админская команда для выполнения на ноде. Панель шлёт её под JWT,
+    ЛК/MCP — по cpk-подписи (`token`). Длина/непустота проверяются здесь; содержимое
+    команды — на ответственности аутентифицированного администратора."""
+    command: str = Field(min_length=1, max_length=4000)
+    # cpk-подписанный токен (typ="exec") для машинного вызова из ЛК. Для панельного
+    # (человеческого) вызова под JWT — не нужен.
+    token: Optional[str] = None

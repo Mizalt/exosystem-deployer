@@ -20,13 +20,14 @@ from datetime import timedelta
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
-from app import crud, models, security
+from app import crud, models, schemas, security
 from app.database import get_db
+from app.rate_limit import client_keys, command_limiter
 from app.services import control_plane
 
 router = APIRouter(tags=["Control plane"])
@@ -155,3 +156,64 @@ def update_info(current_user: CurrentUser):
                      "allowed": allowed,
                      "reason": reason},
     }
+
+
+# --- Веб-терминал «для знатоков» (ADR-090): одна команда → вывод -------------------
+
+def _exec_actor(request: Request, data: schemas.TerminalCommandIn, db: Session) -> str:
+    """Аутентифицирует вызов /api/admin/exec и возвращает метку актора для лога.
+
+    Два пути (как у остальной поверхности ноды):
+      • **cpk-подпись** (`token`, typ="exec") — машинный вызов из ЛК/MCP. Работает
+        даже без панельного пароля, авторизация = сама подпись контрол-плейна.
+      • **Панельный JWT** — человек в веб-терминале панели (тот же bearer, что у
+        любого защищённого роута). Без токена cpk идём этим путём.
+    Любой сбой авторизации → 401/404, команда НЕ выполняется."""
+    if data.token:
+        payload = _verified_payload(data.token, "exec")   # 404 если cpk выключен, 401 если плохой
+        return f"cp:{payload.get('sub') or 'lk'}"
+    # Панельный путь: требуем валидный JWT (иначе 401). Ошибку get_current_user
+    # переиспользуем «вручную», т.к. эндпоинт принимает и cpk-вариант без bearer.
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Требуется вход в панель.",
+                            headers={"WWW-Authenticate": "Bearer"})
+    user = security.get_current_user(token=token, db=db)  # бросит 401 при плохом токене
+    return f"panel:{user.username}"
+
+
+@router.post("/api/admin/exec")
+def admin_exec(data: schemas.TerminalCommandIn, request: Request,
+               db: Session = Depends(get_db)):
+    """Выполнить ОДНУ админскую команду на ноде и вернуть вывод (ADR-090).
+
+    🔒 Фича повышенного риска, поэтому «обёрнута сохранениями»:
+      • **выключатель** `DEPLOYER_TERMINAL_ENABLED=false` → 403 (ничего не выполняем);
+      • **аутентификация** — cpk-подпись (ЛК/MCP) ИЛИ панельный JWT (человек);
+      • **rate-limit** — частота вызовов по IP+актору (анти-флуд/DoS);
+      • **таймаут + лимит вывода** — в сервисе (`terminal.run_command`);
+      • **аудит** — строка в лог процесса ноды (ЛК дополнительно пишет `cloud_audit_log`).
+    Возвращает 200 с телом даже при ненулевом коде/таймауте (это НЕ транспортный сбой)."""
+    from app.services import terminal
+
+    if not terminal.terminal_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Веб-терминал отключён на этой ноде (DEPLOYER_TERMINAL_ENABLED=false).")
+    actor = _exec_actor(request, data, db)
+    # Rate-limit ПОСЛЕ аутентификации: ключи по IP клиента и актору (одна учётка →
+    # флуд с ротацией IP ловится по актору).
+    wait = command_limiter.check_and_record(client_keys(request, actor))
+    if wait > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Слишком много команд подряд. Повторите через {wait} с.",
+            headers={"Retry-After": str(wait)})
+    result = terminal.run_command(data.command)
+    # Аудит ноды: у ядра нет БД-журнала (ADR-090) — пишем в stdout процесса, куда
+    # смотрит владелец сервера (docker logs). Команду НЕ обрезаем — знать, что
+    # выполнялось, важнее краткости; секретов в команде мы не добавляем.
+    print(f"AUDIT: terminal exec by {actor}: exit={result['exit_code']} "
+          f"timed_out={result['timed_out']} cmd={result['command']!r}")
+    return result

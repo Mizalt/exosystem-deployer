@@ -60,8 +60,57 @@ class LoginRateLimiter:
             self._fails.clear()
 
 
-# Единый экземпляр на процесс.
+class CommandRateLimiter:
+    """Скользящее окно частоты команд веб-терминала (ADR-090): max_calls за window c.
+
+    В отличие от `LoginRateLimiter` (лимит по НЕУДАЧАМ, сброс при успехе) — здесь
+    лимит по ЛЮБОМУ вызову: терминал исполняет произвольные команды на хосте, поэтому
+    ограничиваем частоту как таковую (анти-флуд/анти-DoS), успех не «прощает» лимит.
+    Состояние — в памяти процесса, чистится лениво.
+    """
+
+    def __init__(self, max_calls: int = 30, window: int = 60):
+        self.max_calls = max_calls
+        self.window = window
+        self._calls: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def check_and_record(self, keys) -> int:
+        """Регистрирует вызов и возвращает 0 (разрешено) или сек до освобождения слота.
+
+        Атомарно: если хоть один ключ уже на лимите — вызов НЕ записывается и
+        возвращается retry_after (иначе флуд продлевал бы блок бесконечно)."""
+        now = time.time()
+        with self._lock:
+            windows = {}
+            wait = 0
+            for key in keys:
+                ts = [t for t in self._calls.get(key, []) if t > now - self.window]
+                windows[key] = ts
+                if len(ts) >= self.max_calls:
+                    wait = max(wait, int(ts[-self.max_calls] + self.window - now) + 1)
+            if wait > 0:
+                # Сохраняем подчищенные окна, но НЕ добавляем текущий вызов.
+                for key, ts in windows.items():
+                    if ts:
+                        self._calls[key] = ts
+                    else:
+                        self._calls.pop(key, None)
+                return wait
+            for key, ts in windows.items():
+                ts.append(now)
+                self._calls[key] = ts
+            return 0
+
+    def clear(self) -> None:
+        """Полный сброс (используется тестами)."""
+        with self._lock:
+            self._calls.clear()
+
+
+# Единые экземпляры на процесс.
 login_limiter = LoginRateLimiter()
+command_limiter = CommandRateLimiter()
 
 
 def client_keys(request, username: str) -> list[str]:

@@ -124,10 +124,14 @@ app = FastAPI(title="EXOSYSTEM DEPLOY", lifespan=lifespan)
 
 @app.middleware("http")
 async def add_security_headers(request, call_next):
-    """Заголовки безопасности на ответы панели (не на проксируемые приложения)."""
+    """Заголовки безопасности на ответы панели (не на проксируемые приложения).
+
+    Набор динамический (ADR-092): при заданном embed-origin (env/пуш ЛК) панель
+    разрешает фрейминг РОВНО этому origin (CSP frame-ancestors), иначе — прежний
+    fail-closed запрет (X-Frame-Options: DENY + frame-ancestors 'none')."""
     response = await call_next(request)
     if security_headers.should_apply(request.url.path):
-        for key, value in security_headers.SECURITY_HEADERS.items():
+        for key, value in security_headers.current_headers().items():
             response.headers.setdefault(key, value)
     return response
 
