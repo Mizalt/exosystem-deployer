@@ -315,12 +315,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             </header>
             <div class="page-content dashboard-content">
-                <div class="metrics-strip" id="metricsStrip">${metricsSkeletonHTML()}</div>
+                <div class="dash-section-label"><span class="material-symbols-outlined">monitor_heart</span>Сервер <span class="dash-section-hint">динамика за 24 часа</span></div>
                 <div id="hostHealthWrap">${hostHealthSkeletonHTML()}</div>
+                <div class="dash-section-label"><span class="material-symbols-outlined">deployed_code</span>Сервисы и Docker</div>
+                <div class="metrics-strip" id="metricsStrip">${metricsSkeletonHTML()}</div>
                 <div class="dashboard-view-host" id="dashViewHost"><p style="color:var(--text-secondary)">Загрузка…</p></div>
             </div>`;
         document.getElementById('dashViewSwitcher').querySelectorAll('.view-option').forEach(btn => btn.onclick = () => { localStorage.setItem('dashboardView', btn.dataset.view); renderDashboard(); });
-        document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics', 'hostHealth'); renderDashboard(); };
+        document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics', 'hostHealth', 'metricsHistory'); renderDashboard(); };
         loadDashboardMetrics();
         loadHostHealth();
         const host = document.getElementById('dashViewHost');
@@ -328,10 +330,12 @@ document.addEventListener('DOMContentLoaded', () => {
         catch (e) { if (getToken()) host.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки дашборда.</p>`; }
     }
 
-    // Полоса метрик: 6 карточек присутствуют ВСЕГДА (фикс. сетка). Скелетон показывается
+    // Полоса метрик: карточки присутствуют ВСЕГДА (фикс. сетка). Скелетон показывается
     // до прихода данных, затем значения подставляются в уже отрисованные блоки — поэтому
     // верстка не «прыгает» (не появляется/не меняет размер при загрузке).
-    const METRIC_LABELS = ['Сервисы', 'CPU сервисов', 'RAM сервисов', 'Сеть сервисов', 'Диск Docker', 'Хост'];
+    // Ночь 19: карточка «Хост» убрана — хост-метрики живут в секции «Сервер» (графики),
+    // дублирование делало дашборд наляпистым.
+    const METRIC_LABELS = ['Сервисы', 'CPU сервисов', 'RAM сервисов', 'Сеть сервисов', 'Диск Docker'];
     const metricCardHTML = (label, value, sub, accent) =>
         `<div class="metric-card${accent ? ' ' + accent : ''}"><div class="metric-label">${label}</div><div class="metric-value">${value}</div><div class="metric-sub">${sub}</div></div>`;
     function metricsSkeletonHTML() {
@@ -359,8 +363,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 metricCardHTML('CPU сервисов', `${load.cpu_percent ?? 0}%`, `${load.managed_running ?? 0} запущено`) +
                 metricCardHTML('RAM сервисов', fmtMb(load.memory_usage_mb), `из ${fmtMb(host.mem_total_mb)} хоста`) +
                 metricCardHTML('Сеть сервисов', `↓ ${fmtMb(load.net_rx_mb)}`, `↑ ${fmtMb(load.net_tx_mb)}`) +
-                metricCardHTML('Диск Docker', fmtMb(disk.images_mb), `образы · тома ${fmtMb(disk.volumes_mb)}`) +
-                metricCardHTML('Хост', `${host.ncpu ?? '?'} CPU`, `${fmtMb(host.mem_total_mb)} RAM · Docker ${host.server_version ?? ''}`);
+                metricCardHTML('Диск Docker', fmtMb(disk.images_mb), `образы · тома ${fmtMb(disk.volumes_mb)} · Docker ${host.server_version ?? '?'}`);
         } catch (e) {
             // Даже при сбое Docker карточки остаются на месте (значение «—», подпись «недоступно»),
             // чтобы полоса метрик не схлопывалась и верстка не прыгала.
@@ -368,12 +371,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- Виджет «Здоровье сервера» (Ночь 13, 21_HOST_OPS волна 1): диск/память/swap/
-    // load ХОСТА с порогами (жёлтый >80%, красный >92%) + warnings от сервера.
-    // Владелец видит переполняющийся диск/отсутствие swap ДО падения (ADR-078),
-    // не заходя по SSH. Значения приходят из GET /api/host/health; на хосте без
-    // /proc (dev-Windows) сервер отдаёт null — карточка честно показывает «—».
-    const HH_LABELS = ['Диск сервера', 'Память сервера', 'Swap', 'Нагрузка'];
+    // --- Виджет «Здоровье сервера» (Ночь 13, 21_HOST_OPS волна 1): ЦП/память/диск/
+    // swap ХОСТА с порогами (жёлтый >80%, красный >92%) + warnings от сервера.
+    // Ночь 19: значения стали ГРАФИКАМИ с динамикой за 24 ч (как в ЛК) — история
+    // из GET /api/system/metrics/history (минутный сэмплер metrics_history.py).
+    // На хосте без /proc (dev-Windows) сервер отдаёт null — карточка честно «—».
+    const HH_LABELS = ['ЦП сервера', 'Память сервера', 'Диск сервера', 'Swap'];
     let lastHostHealthSig = '';
     function hostHealthSkeletonHTML() {
         lastHostHealthSig = '';
@@ -384,16 +387,49 @@ document.addEventListener('DOMContentLoaded', () => {
     const hhPct = v => (v == null ? '—' : `${Math.round(v)}%`);
     // Порог карточки считает СЕРВЕР (status/warnings) — здесь только раскраска значения.
     const hhLevel = pct => (pct == null ? '' : (pct >= 92 ? 'crit' : (pct >= 80 ? 'warn' : 'ok')));
-    function hhCardHTML(label, pct, sub) {
+    // Спарклайн динамики (как в ЛК): полилиния + заливка, без библиотек.
+    function sparklineSVG(vals, lvl, height = 34) {
+        const nums = vals.filter(v => v != null);
+        if (nums.length < 2) return '';
+        const w = 100, h = height, pad = 2, n = vals.length;
+        const pts = [];
+        vals.forEach((v, i) => {
+            if (v == null) return;
+            const x = n > 1 ? (i / (n - 1)) * w : w;
+            const y = h - pad - (Math.min(100, Math.max(0, v)) / 100) * (h - pad * 2);
+            pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+        });
+        const first = pts[0].split(',')[0], last = pts[pts.length - 1].split(',')[0];
+        return `<svg class="spark ${lvl || ''}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><polygon points="${first},${h} ${pts.join(' ')} ${last},${h}"></polygon><polyline points="${pts.join(' ')}"></polyline></svg>`;
+    }
+    function hhCardHTML(label, pct, sub, series) {
         const lvl = hhLevel(pct);
-        const bar = pct == null ? '' :
-            `<div class="hh-bar"><div class="hh-bar-fill ${lvl}" style="width:${Math.max(2, Math.min(100, pct))}%"></div></div>`;
-        return `<div class="metric-card hh-${lvl || 'na'}"><div class="metric-label">${label}</div><div class="metric-value">${hhPct(pct)}</div>${bar}<div class="metric-sub">${sub}</div></div>`;
+        const spark = series ? sparklineSVG(series, lvl) : '';
+        const graph = spark || (pct == null ? '' :
+            `<div class="hh-bar"><div class="hh-bar-fill ${lvl}" style="width:${Math.max(2, Math.min(100, pct))}%"></div></div>`);
+        return `<div class="metric-card hh-${lvl || 'na'}"><div class="metric-label">${label}</div><div class="metric-value">${hhPct(pct)}</div>${graph}<div class="metric-sub">${sub}</div></div>`;
     }
     function fmtUptime(sec) {
         if (sec == null) return '';
         const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
         return d > 0 ? `аптайм ${d} д ${h} ч` : `аптайм ${h} ч ${Math.floor((sec % 3600) / 60)} мин`;
+    }
+    // Колонка истории метрик (1=ЦП, 2=Память, 3=Диск) + живой снимок хвостом.
+    // История длиной в сутки прореживается до ~90 точек — спарклайну больше не нужно.
+    function metricSeries(hist, col, currentPct) {
+        const pts = (hist && Array.isArray(hist.points)) ? hist.points : [];
+        let vals = pts.map(p => (Array.isArray(p) && p[col] != null ? p[col] : null));
+        const step = Math.ceil(vals.length / 90);
+        if (step > 1) {
+            const thin = [];
+            for (let i = 0; i < vals.length; i += step) {
+                const chunk = vals.slice(i, i + step).filter(v => v != null);
+                thin.push(chunk.length ? Math.max(...chunk) : null);
+            }
+            vals = thin;
+        }
+        if (currentPct != null) vals.push(currentPct);
+        return vals;
     }
     async function loadHostHealth() {
         const wrap = document.getElementById('hostHealthWrap');
@@ -404,26 +440,35 @@ document.addEventListener('DOMContentLoaded', () => {
             if (getToken()) wrap.innerHTML = `<div class="metrics-strip host-health-strip">${HH_LABELS.map(l => `<div class="metric-card"><div class="metric-label">${l}</div><div class="metric-value">—</div><div class="metric-sub">недоступно</div></div>`).join('')}</div>`;
             return;
         }
+        let hist = null;
+        try { hist = await fetchData('metricsHistory', '/api/system/metrics/history'); }
+        catch (e) { /* истории может не быть (первый запуск) — карточки живут барами */ }
         // Точечное обновление: перерисовываем только при изменении данных (без миганий).
-        const sig = JSON.stringify(h);
+        const sig = JSON.stringify(h) + '|' + (hist && hist.points ? hist.points.length : 0);
         if (sig === lastHostHealthSig) return;
         lastHostHealthSig = sig;
         const disk = h.disk || {}, mem = h.memory || {}, swap = h.swap || {};
         const load = h.load || null, cpu = h.cpu_count;
+        const cpuPct = (load && cpu) ? Math.min(100, Math.round((load[0] / cpu) * 100)) : null;
         const noSwap = swap.total_mb === 0;
         const swapCard = noSwap
             ? `<div class="metric-card hh-warn"><div class="metric-label">Swap</div><div class="metric-value">нет</div><div class="metric-sub">не настроен — риск OOM при сборке</div></div>`
             : hhCardHTML('Swap', swap.used_pct, swap.total_mb == null ? 'нет данных' : `${(swap.total_mb / 1024).toFixed(1)} GB выделено`);
-        const loadCard = `<div class="metric-card hh-${load && cpu && load[1] > 2 * cpu ? 'warn' : (load ? 'ok' : 'na')}"><div class="metric-label">Нагрузка</div><div class="metric-value">${load ? load[1].toFixed(2) : '—'}</div><div class="metric-sub">${load ? `load 5 мин · ${cpu ?? '?'} CPU${h.uptime_sec != null ? ' · ' + fmtUptime(h.uptime_sec) : ''}` : 'нет данных'}</div></div>`;
         const warns = (h.warnings || []);
         const warnHTML = warns.length
             ? `<div class="host-health-warnings ${h.status === 'crit' ? 'crit' : ''}"><span class="material-symbols-outlined">warning</span>${warns.map(escapeHTML).join(' · ')}</div>`
             : '';
         wrap.innerHTML = `<div class="metrics-strip host-health-strip">`
-            + hhCardHTML('Диск сервера', disk.used_pct, disk.free_gb == null ? 'нет данных' : `свободно ${disk.free_gb} GB из ${disk.total_gb} GB`)
-            + hhCardHTML('Память сервера', mem.used_pct, mem.available_mb == null ? 'нет данных' : `доступно ${(mem.available_mb / 1024).toFixed(1)} GB из ${(mem.total_mb / 1024).toFixed(1)} GB`)
+            + hhCardHTML('ЦП сервера', cpuPct,
+                load ? `load ${load[0].toFixed(2)} · ${cpu ?? '?'} CPU${h.uptime_sec != null ? ' · ' + fmtUptime(h.uptime_sec) : ''}` : 'нет данных',
+                metricSeries(hist, 1, cpuPct))
+            + hhCardHTML('Память сервера', mem.used_pct,
+                mem.available_mb == null ? 'нет данных' : `доступно ${(mem.available_mb / 1024).toFixed(1)} GB из ${(mem.total_mb / 1024).toFixed(1)} GB`,
+                metricSeries(hist, 2, mem.used_pct))
+            + hhCardHTML('Диск сервера', disk.used_pct,
+                disk.free_gb == null ? 'нет данных' : `свободно ${disk.free_gb} GB из ${disk.total_gb} GB`,
+                metricSeries(hist, 3, disk.used_pct))
             + swapCard
-            + loadCard
             + `</div>${warnHTML}`;
     }
 
@@ -2115,10 +2160,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Drawer открыт → живёт-обновляем его (а дашборд под ним не трогаем, чтобы не сбить zoom).
                     if (drawerOpen) pollServiceDrawer(services);
                     else {
-                        if (changed) { invalidateCache('systemMetrics'); renderDashboard(); }
+                        if (changed) { invalidateCache('systemMetrics', 'metricsHistory'); renderDashboard(); }
                         // Здоровье хоста живёт своим диффом (Ночь 13): диск/память
-                        // ползут независимо от сервисов — обновляем каждый тик.
-                        else { invalidateCache('hostHealth'); loadHostHealth(); }
+                        // ползут независимо от сервисов — обновляем каждый тик
+                        // (+ история для графиков, Ночь 19 — новая точка раз в минуту).
+                        else { invalidateCache('hostHealth', 'metricsHistory'); loadHostHealth(); }
                     }
                 }
             } else if (onApplications) {
