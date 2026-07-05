@@ -44,6 +44,7 @@ import asyncio
 from app.services.orchestrator import run_orchestrator_loop
 from app.services.pending_actions import run_pending_actions_loop
 from app.services.ssl_renewal import run_ssl_renewal_loop
+from app.services.metrics_history import run_metrics_history_loop
 
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -99,6 +100,8 @@ async def lifespan(app: FastAPI):
     pending_task = asyncio.create_task(run_pending_actions_loop())
     # Часовой чекер сроков сертификатов → задачи автопродления (Ночь 16, ADR-085).
     ssl_renewal_task = asyncio.create_task(run_ssl_renewal_loop())
+    # Минутный сэмплер метрик хоста → графики динамики на дашборде (Ночь 19).
+    metrics_task = asyncio.create_task(run_metrics_history_loop())
     print("SUCCESS: Infrastructure ready and Orchestrator started.")
 
     yield
@@ -107,8 +110,9 @@ async def lifespan(app: FastAPI):
     orchestrator_task.cancel()
     pending_task.cancel()
     ssl_renewal_task.cancel()
+    metrics_task.cancel()
     for task, label in ((orchestrator_task, "Orchestrator"), (pending_task, "Pending-actions"),
-                        (ssl_renewal_task, "SSL-renewal")):
+                        (ssl_renewal_task, "SSL-renewal"), (metrics_task, "Metrics-history")):
         try:
             await task
         except asyncio.CancelledError:
@@ -584,6 +588,17 @@ def get_system_metrics(current_user: CurrentUser):
         return {"host": {}, "disk": {}, "load": {}}
 
 
+@app.get("/api/system/metrics/history", tags=["System"])
+def get_system_metrics_history(current_user: CurrentUser, minutes: int = 1440):
+    """История метрик хоста (ЦП/память/диск) для графиков дашборда (Ночь 19).
+
+    Точки [t, cpu%, mem%, disk%] раз в минуту за ≤24 ч (кольцевой буфер сэмплера
+    `app/services/metrics_history.py`). Только под auth — операционные данные хоста.
+    """
+    from app.services import metrics_history
+    return metrics_history.history(minutes=minutes)
+
+
 @app.get("/api/host/health", tags=["System"])
 def get_host_health(current_user: CurrentUser):
     """Здоровье ХОСТА: диск/память/swap/load/uptime/docker + warnings (Ночь 13).
@@ -852,7 +867,7 @@ async def import_artifact_from_github(
         from app.secret_box import get_secret_box
         headers["Authorization"] = f"Bearer {get_secret_box().open(gh_conn.token_secret)}"
 
-    tar_bytes, used_ref = None, None
+    tar_bytes = None
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
         for ref in refs_to_try:
             url = f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}"
@@ -861,7 +876,7 @@ async def import_artifact_from_github(
             except httpx.HTTPError:
                 continue
             if resp.status_code == 200:
-                tar_bytes, used_ref = resp.content, ref
+                tar_bytes = resp.content
                 break
 
     if tar_bytes is None:
