@@ -429,13 +429,13 @@ def _handle_ssl_renew(db, action) -> None:
     if not params.get("renewable", True):
         # Загруженный вручную серт: LE его не выпускал — продлить не можем, только
         # честно предупреждаем заранее (владелец должен загрузить обновлённый).
-        _fail(action, f"Сертификат «{cert}» загружен вручную и истекает "
-                      f"{expiry:%d.%m.%Y} (через {int(left)} дн.). Автопродление "
+        _fail(action, f"Сертификат «{cert}» загружен вручную и "
+                      f"{ssl_renewal.expiry_text(expiry, left)}. Автопродление "
                       "невозможно — загрузите обновлённый сертификат на странице SSL.")
         return
 
     # Для LE-сертификатов имя лineage = домен (так их создают наши потоки выпуска).
-    _append_log(action, f"Продлеваю сертификат {cert} (истекает через {int(left)} дн.)…")
+    _append_log(action, f"Продлеваю сертификат {cert} ({ssl_renewal.days_phrase(left)})…")
     started = time.time()
     ok, ssl_log = issue_certificate(cert)
     _append_log(action, ssl_log)
@@ -449,8 +449,8 @@ def _handle_ssl_renew(db, action) -> None:
         return
 
     if left <= ssl_renewal.ALERT_DAYS:
-        _fail(action, f"Не удаётся продлить SSL для «{cert}» — истекает "
-                      f"{expiry:%d.%m.%Y} (через {int(left)} дн.)! Проверьте, что "
+        _fail(action, f"Не удаётся продлить SSL для «{cert}» — "
+                      f"{ssl_renewal.expiry_text(expiry, left)}! Проверьте, что "
                       "A-запись домена указывает на этот сервер и открыт 80-й порт. "
                       "Автопопытки продолжатся; можно нажать «Повторить» после починки.")
         return

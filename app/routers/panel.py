@@ -4,8 +4,10 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, BackgroundTasks
-from app import panel_config
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+
+from app import embed_config, panel_config
 from app.services import nginx_manager
 # --- ИМПОРТЫ ДЛЯ АУТЕНТИФИКАЦИИ ---
 from app import security, models
@@ -66,6 +68,27 @@ def _close_port_background() -> None:
                       f"(порт 7999 не будет переопубликован при compose up)")
         except Exception as e:
             print(f"WARN: close-initial-access: не удалось удалить {path}: {e}")
+
+
+class EmbedOriginIn(BaseModel):
+    origin: str | None = None
+
+
+@router.post("/embed-origin")
+def set_embed_origin(data: EmbedOriginIn, current_user: CurrentUser):
+    """Разрешает встраивание панели в iframe РОВНО одному origin (ADR-092).
+
+    Зовёт контрол-плейн по каналу управления перед открытием «панели внутри ЛК»:
+    нода начинает отдавать `CSP frame-ancestors <origin>` вместо полного запрета.
+    `origin: null` — вернуть fail-closed запрет. env `DEPLOYER_EMBED_ORIGIN`
+    (если задан) имеет приоритет над пушем. Идемпотентно.
+    """
+    try:
+        origin = embed_config.normalize_origin(data.origin)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    embed_config.save_origin(origin)
+    return {"origin": origin, "effective_origin": embed_config.get_embed_origin()}
 
 
 @router.post("/close-initial-access")

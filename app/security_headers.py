@@ -48,3 +48,29 @@ _SKIP_PREFIXES = ("/api/proxy/",)
 def should_apply(path: str) -> bool:
     """True, если к ответу по этому пути нужно добавить заголовки безопасности панели."""
     return not any(path.startswith(p) for p in _SKIP_PREFIXES)
+
+
+def build_headers(embed_origin: str | None) -> dict:
+    """Заголовки безопасности с учётом доверенного embed-origin (ADR-092).
+
+    Без origin — прежний fail-closed набор (`SECURITY_HEADERS`: DENY +
+    `frame-ancestors 'none'`). С origin — фрейминг разрешён РОВНО одному origin
+    ЛК: `frame-ancestors <origin>`, а `X-Frame-Options` не шлём вовсе (у него
+    нет «разрешить конкретный origin» — устаревший ALLOW-FROM не поддерживается,
+    а DENY противоречил бы CSP; браузеры с поддержкой frame-ancestors всё равно
+    обязаны игнорировать XFO при его наличии).
+    """
+    if not embed_origin:
+        return SECURITY_HEADERS
+    headers = dict(SECURITY_HEADERS)
+    headers.pop("X-Frame-Options", None)
+    headers["Content-Security-Policy"] = CSP.replace(
+        "frame-ancestors 'none'", f"frame-ancestors {embed_origin}")
+    return headers
+
+
+def current_headers() -> dict:
+    """Заголовки для ЭТОГО ответа: учитывают текущий embed-origin (env/файл)."""
+    from app import embed_config
+
+    return build_headers(embed_config.get_embed_origin())

@@ -133,6 +133,34 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
             </div>`,
+        terminal: `
+            <header><h1>Терминал</h1></header>
+            <div class="page-content">
+                <div class="settings-card" style="max-width:920px;">
+                    <div class="terminal-warn">
+                        <span class="material-symbols-outlined">warning</span>
+                        <div>
+                            <strong>Терминал для знатоков.</strong> Команды выполняются прямо
+                            на этом сервере с правами панели. Одна команда — один вывод (не
+                            интерактивная сессия): <code>df -h</code>, <code>docker ps</code>,
+                            <code>free -m</code>. Есть таймаут и лимит вывода; каждая команда
+                            пишется в журнал. Неверная команда может навредить серверу.
+                        </div>
+                    </div>
+                    <label class="terminal-ack">
+                        <input type="checkbox" id="terminalAck">
+                        Понимаю риск — включить ввод команд
+                    </label>
+                    <div id="terminalWindow" class="log-window" style="height:380px; display:none;"></div>
+                    <form id="terminalForm" style="display:none; margin-top:12px; gap:10px; align-items:stretch;">
+                        <span class="terminal-prompt">$</span>
+                        <input type="text" id="terminalInput" class="terminal-input" autocomplete="off"
+                               spellcheck="false" placeholder="команда, напр. df -h  (↑/↓ — история)" disabled>
+                        <button type="submit" class="btn btn-primary" id="terminalRun" disabled>
+                            <span class="material-symbols-outlined">play_arrow</span>Выполнить</button>
+                    </form>
+                </div>
+            </div>`,
     };
 
     // --- Логика Аутентификации ---
@@ -286,7 +314,8 @@ document.addEventListener('DOMContentLoaded', () => {
             renderPipeline(freshPipeline);
         } else {
             mainContent.innerHTML = templates[page] || `<p>Страница не найдена</p>`;
-            const initFunctions = { dashboard: initDashboardPage, ssl: initSslPage, settings: initSettingsPage };
+            enhancePasswordInputs(mainContent);  // «глаз» у паролей страницы (GitHub PAT и др.)
+            const initFunctions = { dashboard: initDashboardPage, ssl: initSslPage, settings: initSettingsPage, terminal: initTerminalPage };
             if (initFunctions[page]) initFunctions[page]();
         }
         document.querySelectorAll('.nav-item').forEach(link => link.classList.toggle('active', link.dataset.page === page));
@@ -933,7 +962,7 @@ document.addEventListener('DOMContentLoaded', () => {
         body.innerHTML = `
             <div class="detail-chain">
                 ${drawerRow('Тип', 'Приложение (публичный домен)')}
-                ${drawerRow('Домен', `<a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a>`)}
+                ${drawerRow('Домен', `<a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a>${copyBtnHTML(`${proto}://${app.domain}`, 'Скопировать адрес')}`)}
                 ${drawerRow('SSL', app.ssl_cert_name
                     ? `<span class="material-symbols-outlined inline-ico" style="color:var(--success)">lock</span> ${escapeHTML(app.ssl_cert_name)}`
                     : '<span class="material-symbols-outlined inline-ico" style="color:var(--text-secondary)">no_encryption</span> HTTP')}
@@ -974,7 +1003,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div>
                     <strong>Первичный доступ открыт по IP</strong>
                     <p>Панель сейчас доступна по голому IP без HTTPS. Задайте домен и SSL ниже, затем закройте первичный доступ на сервере:</p>
-                    <code>sh /opt/exosystem-deployer/close-initial-access.sh</code>
+                    <code>sh /opt/exosystem-deployer/close-initial-access.sh</code>${copyBtnHTML('sh /opt/exosystem-deployer/close-initial-access.sh', 'Скопировать команду')}
                 </div>
             </div>`;
     };
@@ -1012,6 +1041,81 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('githubDisconnectBtn').onclick = handleGithubDisconnect;
         loadGithubIntegration();
     };
+
+    // --- Терминал «для знатоков» (ADR-090): одна команда → вывод ---
+    function initTerminalPage() {
+        const ack = document.getElementById('terminalAck');
+        const form = document.getElementById('terminalForm');
+        const input = document.getElementById('terminalInput');
+        const runBtn = document.getElementById('terminalRun');
+        const win = document.getElementById('terminalWindow');
+        if (!ack || !form || !input || !win) return;
+        const history = [];
+        let histPos = 0;
+
+        const appendLine = (text, cls) => {
+            win.style.display = 'block';
+            const span = cls ? `<span class="log-${cls}">${escapeHTML(text)}</span>` : escapeHTML(text);
+            win.innerHTML += (win.innerHTML ? '\n' : '') + span;
+            win.scrollTop = win.scrollHeight;
+        };
+
+        // Чекбокс-акцепт риска гейтит ввод (расширенный режим для знатоков).
+        ack.onchange = () => {
+            const on = ack.checked;
+            form.style.display = on ? 'flex' : 'none';
+            input.disabled = !on;
+            runBtn.disabled = !on;
+            if (on) input.focus();
+        };
+
+        // История команд стрелками (как в реальном шелле).
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp') {
+                if (histPos > 0) { histPos--; input.value = history[histPos] || ''; }
+                e.preventDefault();
+            } else if (e.key === 'ArrowDown') {
+                if (histPos < history.length) { histPos++; input.value = history[histPos] || ''; }
+                e.preventDefault();
+            }
+        });
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const command = input.value.trim();
+            if (!command) return;
+            if (history[history.length - 1] !== command) history.push(command);
+            histPos = history.length;
+            input.value = '';
+            appendLine('$ ' + command, 'info');
+            input.disabled = true; runBtn.disabled = true;
+            const token = getToken();
+            try {
+                const resp = await fetch('/api/admin/exec', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ command }),
+                });
+                if (resp.status === 401) { clearToken(); showLoginScreen(); return; }
+                let data = {};
+                try { data = await resp.json(); } catch (_) { data = {}; }
+                if (!resp.ok) {
+                    appendLine(data.detail || `Ошибка ${resp.status}.`, 'error');
+                } else {
+                    if (data.output) appendLine(data.output);
+                    const codeCls = (data.exit_code === 0) ? 'success' : 'error';
+                    const codeText = data.timed_out ? 'прервано по таймауту'
+                        : (data.exit_code === null || data.exit_code === undefined)
+                            ? 'не запустилось' : `код выхода: ${data.exit_code}`;
+                    appendLine(`[${codeText}]`, codeCls);
+                }
+            } catch (_) {
+                appendLine('Сеть недоступна — команда не выполнена.', 'error');
+            } finally {
+                input.disabled = false; runBtn.disabled = false; input.focus();
+            }
+        };
+    }
 
     // --- Интеграция GitHub (ADR-033): подключение PAT + статус ---
     async function loadGithubIntegration() {
@@ -1144,6 +1248,81 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const invalidateCache = (...keys) => { keys.forEach(key => CACHE[key] = null); };
     const escapeHTML = str => str?.toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '';
+    // Для значений в HTML-атрибутах (data-copy="…"): + кавычки.
+    const escAttr = str => escapeHTML(str).replace(/"/g, '&quot;');
+
+    // ===== Копирование в буфер (Ночь 20): единый паттерн с ЛК =====
+    // Иконка content_copy → clipboard.writeText → краткий фидбек «Скопировано».
+    // Панель часто живёт по IP без HTTPS (не-secure-context) → фолбэк textarea+execCommand.
+    async function copyText(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (_) { /* ниже — фолбэк */ }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            ta.remove();
+            return ok;
+        } catch (_) { return false; }
+    }
+    function copyFeedback(btn, ok) {
+        const icon = btn.querySelector('.material-symbols-outlined');
+        if (icon) icon.textContent = ok ? 'check' : 'error';
+        btn.classList.add(ok ? 'copied' : 'copy-fail');
+        let tip = btn.querySelector('.copy-tip');
+        if (!tip) { tip = document.createElement('span'); tip.className = 'copy-tip'; btn.appendChild(tip); }
+        tip.textContent = ok ? 'Скопировано' : 'Не удалось';
+        clearTimeout(btn._copyTimer);
+        btn._copyTimer = setTimeout(() => {
+            if (icon) icon.textContent = 'content_copy';
+            btn.classList.remove('copied', 'copy-fail');
+            tip.remove();
+        }, 1400);
+    }
+    const copyBtnHTML = (value, title = 'Копировать') =>
+        `<button type="button" class="copy-btn" data-copy="${escAttr(value)}" title="${escAttr(title)}"><span class="material-symbols-outlined">content_copy</span></button>`;
+    // Делегированный клик: кнопки рождаются в перерисовываемых таблицах/drawer'ах.
+    document.addEventListener('click', async e => {
+        const b = e.target.closest('.copy-btn');
+        if (!b) return;
+        copyFeedback(b, await copyText(b.dataset.copy || ''));
+    });
+
+    // ===== «Глаз» у пароля (Ночь 20): показать/скрыть вводимое (как в ЛК) =====
+    function enhancePasswordInputs(root) {
+        (root || document).querySelectorAll('input[type="password"]').forEach(input => {
+            if (input.dataset.pwEyed) return;
+            input.dataset.pwEyed = '1';
+            const wrap = document.createElement('span');
+            wrap.className = 'pw-field';
+            input.parentNode.insertBefore(wrap, input);
+            wrap.appendChild(input);
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'pw-toggle';
+            btn.title = 'Показать пароль';
+            btn.setAttribute('aria-label', 'Показать пароль');
+            btn.innerHTML = '<span class="material-symbols-outlined">visibility</span>';
+            btn.addEventListener('click', () => {
+                const show = input.type === 'password';
+                input.type = show ? 'text' : 'password';
+                btn.querySelector('.material-symbols-outlined').textContent = show ? 'visibility_off' : 'visibility';
+                btn.title = show ? 'Скрыть пароль' : 'Показать пароль';
+                btn.setAttribute('aria-label', btn.title);
+                input.focus();
+            });
+            wrap.appendChild(btn);
+        });
+    }
     // Русское склонение по числу: forms = [1, 2-4, 5+] (напр. ['версия','версии','версий']).
     const pluralRu = (n, forms) => { const a = Math.abs(n) % 100, b = a % 10; if (a > 10 && a < 20) return forms[2]; if (b > 1 && b < 5) return forms[1]; if (b === 1) return forms[0]; return forms[2]; };
     // Навешивает toggle на kebab-кнопку дропдауна (закрывает остальные открытые меню).
@@ -1549,7 +1728,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const tpl = document.createElement('template');
         tpl.innerHTML = `<tr class="app-row clickable-row" data-app-id="${app.id}" title="Открыть детали приложения">
             <td>${escapeHTML(app.name)}</td>
-            <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a></td>
+            <td><a href="${proto}://${app.domain}" target="_blank">${escapeHTML(app.domain)}</a>${copyBtnHTML(`${proto}://${app.domain}`, 'Скопировать адрес')}</td>
             <td><span class="mono">${escapeHTML(app.service.name)}</span></td>
             <td>${sslCell}</td>
             <td><span class="action-row end">
@@ -1668,12 +1847,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     // Срок серта в UI (Ночь 16, ADR-085): дата + «через N дн.» с подсветкой
     // (≤14 — красный алерт, ≤30 — жёлтый «продлевается»), ручные серты — пометка.
+    // Просроченный (days_left < 0) — не «через -104 дн.», а «истёк N дн. назад».
     function certValidityCell(cert) {
         const date = new Date(cert.not_after).toLocaleDateString();
         const d = cert.days_left;
         if (d === null || d === undefined) return date;
         let color = 'var(--text-secondary)', note = `через ${d} дн.`;
-        if (d <= 14) { color = 'var(--danger)'; note = `через ${d} дн. — истекает!`; }
+        if (d < 0) { color = 'var(--danger)'; note = `истёк ${Math.abs(d)} дн. назад!`; }
+        else if (d <= 14) { color = 'var(--danger)'; note = `через ${d} дн. — истекает!`; }
         else if (d <= 30) { color = 'var(--warning, #fbbc04)'; note = cert.auto_renew ? `через ${d} дн. — продлевается` : `через ${d} дн.`; }
         const manual = cert.auto_renew ? '' : ` <span style="color:var(--text-secondary)">· ручной</span>`;
         return `${date} <span style="color:${color}">(${note})</span>${manual}`;
@@ -2035,7 +2216,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function taskResultHTML(a) {
         if (!a.result) return '';
         const body = (a.status === 'done' && /^https?:\/\//.test(a.result))
-            ? `<a href="${escapeHTML(a.result)}" target="_blank" rel="noopener">${escapeHTML(a.result)}</a>`
+            ? `<a href="${escapeHTML(a.result)}" target="_blank" rel="noopener">${escapeHTML(a.result)}</a>${copyBtnHTML(a.result, 'Скопировать адрес')}`
             : escapeHTML(a.result);
         return `<div class="task-item-result">${body}</div>`;
     }
@@ -2262,7 +2443,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     })();
 
+    // Embedded-режим (ADR-092): панель открыта в iframe ЛК (`?embedded=1`) — прячем
+    // дублирующее обрамление (логотип и «Выйти»: бренд и сессия там — у ЛК), чтобы не
+    // было «сайта в сайте». Навигация панели остаётся. Флаг запоминается в
+    // sessionStorage (переживает hash-переходы/перезагрузку внутри iframe и живёт
+    // только в этой вкладке) — standalone-режим по прямому домену не затрагивается.
+    (() => {
+        const inQuery = /[?&]embedded=1(&|$)/.test(window.location.search);
+        let embedded = inQuery;
+        try {
+            if (inQuery) sessionStorage.setItem('panelEmbedded', '1');
+            embedded = embedded || sessionStorage.getItem('panelEmbedded') === '1';
+        } catch (_) { /* приватный режим/запрет стораджа — хватит и query */ }
+        if (embedded) document.body.classList.add('embedded');
+    })();
+
     // --- Инициализация Приложения ---
+    enhancePasswordInputs(document);  // «глаз» у пароля формы входа
     if (getToken()) {
         showApp();
     } else {

@@ -16,7 +16,7 @@ from app import editions
 
 # Semver сборки деплоера. Бампать при значимых изменениях API/поведения. На проде
 # может переопределяться env `DEPLOYER_VERSION` (напр. проставляется при сборке образа).
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 
 # Минимальная версия, на которую БЕЗОПАСЕН откат из UI (страж даунгрейда, Ночь 16,
 # ADR-085). Миграции ноды forward-only: ниже 0.11.0 нет самого механизма
@@ -45,6 +45,8 @@ CAPABILITIES = (
     "ssl_renewal",      # автопродление SSL + GET /api/ssl/expiring (алерты сроков, Ночь 16)
     "update_info",      # история версий + страж отката: GET /api/admin/update-info (Ночь 16)
     "metrics_history",  # история метрик хоста: GET /api/system/metrics/history (Ночь 19)
+    "terminal_exec",    # веб-терминал: POST /api/admin/exec (одна команда → вывод, ADR-090)
+    "panel_embed",      # панель внутри ЛК: CSP frame-ancestors по пушу origin (ADR-092)
 )
 
 

@@ -32,7 +32,9 @@ def _write_cert(base, name: str, days: float, le: bool = True) -> None:
             .subject_name(subject).issuer_name(subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(now - timedelta(days=1))
+            # not_before всегда за 90 дн. до истечения — корректно и для уже
+            # просроченных сертов (days < 0), нужных тестам «истёк N дн. назад».
+            .not_valid_before(now + timedelta(days=days) - timedelta(days=90))
             .not_valid_after(now + timedelta(days=days))
             .sign(key, hashes.SHA256()))
     cert_dir = (base / "live" / name) if le else (base / name)
@@ -205,6 +207,37 @@ def test_renew_failure_alerts_at_14_days(db, ssl_dir, monkeypatch):
     pa._handle_ssl_renew(db, action)
     assert action.status == "error"
     assert "истекает" in action.result
+
+
+def test_days_phrase_and_expiry_text():
+    """Просроченный серт — «истёк N дн. назад», а не «через -N дн.» (фикс 2026-07-05)."""
+    assert ssl_renewal.days_phrase(5.7) == "истекает через 5 дн."
+    assert ssl_renewal.days_phrase(-104.3) == "истёк 104 дн. назад"
+    expiry = datetime(2026, 3, 22, tzinfo=timezone.utc)
+    assert ssl_renewal.expiry_text(expiry, 10.2) == "истекает 22.03.2026 (через 10 дн.)"
+    assert ssl_renewal.expiry_text(expiry, -104.0) == "истёк 22.03.2026 (104 дн. назад)"
+
+
+def test_renew_failure_expired_cert_says_ago(db, ssl_dir, monkeypatch):
+    """Серт УЖЕ истёк: алерт говорит «истёк N дн. назад», а не «через -104 дн.»."""
+    _write_cert(ssl_dir, "late.example.com", days=-104)
+    action = _make_renew_action(db, cert="late.example.com")
+    monkeypatch.setattr(pa, "issue_certificate", lambda d: (False, "certbot упал"))
+    pa._handle_ssl_renew(db, action)
+    assert action.status == "error"
+    assert "истёк" in action.result and "дн. назад" in action.result
+    assert "через -" not in action.result and "через -" not in (action.log or "")
+
+
+def test_renew_manual_expired_cert_says_ago(db, ssl_dir, monkeypatch):
+    """Ручной серт уже истёк: честное «истёк N дн. назад» без отрицательных дней."""
+    _write_cert(ssl_dir, "old-custom", days=-30, le=False)
+    action = _make_renew_action(db, cert="old-custom", renewable=False)
+    monkeypatch.setattr(pa, "issue_certificate", lambda d: (True, ""))
+    pa._handle_ssl_renew(db, action)
+    assert action.status == "error"
+    assert "вручную" in action.result and "дн. назад" in action.result
+    assert "через -" not in action.result
 
 
 def test_renew_manual_cert_alerts_without_certbot(db, ssl_dir, monkeypatch):

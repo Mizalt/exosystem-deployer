@@ -192,6 +192,11 @@ def cloud_env():
     # Лимитер логина — процессный синглтон с ключом ip:testclient (общим для всех тестов),
     # чистим на каждый тест, чтобы неудачи одного не «протекали» в другой (Ночь 4).
     cloud_login_limiter.clear()
+    # ADR-093: процессные кэши сессий/лимитов тоже не должны протекать между тестами.
+    from app.cloud import auth as cloud_auth
+    from app.cloud.routers.admin import admin_action_limiter
+    cloud_auth.clear_last_seen_cache()
+    admin_action_limiter.clear()
 
     engine = create_engine(
         "sqlite://",
