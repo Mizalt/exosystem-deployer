@@ -145,6 +145,7 @@ async def add_security_headers(request, call_next):
 app.include_router(ssl.router)
 app.include_router(proxy.router)
 app.include_router(panel.router)
+app.include_router(panel.ai_router)  # ИИ-помощник панели: GET /api/panel/ai-availability (ADR-103)
 app.include_router(auth.router)
 app.include_router(control_plane.router)  # cpk-эндпоинты; без env-ключа отвечают 404
 app.include_router(pending.router)  # центр фоновых задач (публикация/SSL) — ADR-069
