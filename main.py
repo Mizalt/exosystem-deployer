@@ -34,6 +34,7 @@ from app import editions
 from app import version as deployer_version
 from app import run_config
 from app import security_headers
+from app import pro_gate
 from app.environment import get_docker_client
 from app.database import get_db, init_db_with_migrations, SessionLocal
 from app.routers import proxy, ssl, panel, auth, control_plane, pending
@@ -102,6 +103,8 @@ async def lifespan(app: FastAPI):
     ssl_renewal_task = asyncio.create_task(run_ssl_renewal_loop())
     # Минутный сэмплер метрик хоста → графики динамики на дашборде (Ночь 19).
     metrics_task = asyncio.create_task(run_metrics_history_loop())
+    # PRO-фоновые задачи (проверка лицензии, ADR-100) — пусто в OSS-срезе (нет app/pro).
+    pro_tasks = pro_gate.start_pro_background_tasks()
     print("SUCCESS: Infrastructure ready and Orchestrator started.")
 
     yield
@@ -111,8 +114,11 @@ async def lifespan(app: FastAPI):
     pending_task.cancel()
     ssl_renewal_task.cancel()
     metrics_task.cancel()
+    for t in pro_tasks:
+        t.cancel()
     for task, label in ((orchestrator_task, "Orchestrator"), (pending_task, "Pending-actions"),
-                        (ssl_renewal_task, "SSL-renewal"), (metrics_task, "Metrics-history")):
+                        (ssl_renewal_task, "SSL-renewal"), (metrics_task, "Metrics-history"),
+                        *((t, "PRO-task") for t in pro_tasks)):
         try:
             await task
         except asyncio.CancelledError:
@@ -143,6 +149,11 @@ app.include_router(auth.router)
 app.include_router(control_plane.router)  # cpk-эндпоинты; без env-ключа отвечают 404
 app.include_router(pending.router)  # центр фоновых задач (публикация/SSL) — ADR-069
 
+# PRO-роутеры (ADR-100): точка расширения с graceful-фолбэком. Нет app/pro (OSS-срез)
+# → no-op (эндпоинты /api/pro/* отсутствуют → 404). Есть каталог → роутеры
+# зарегистрированы, но каждый вызов гейтится лицензией (require_pro_feature/cpk).
+pro_gate.register_pro_routers(app)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 CurrentUser = Annotated[models.User, Depends(security.get_current_user)]
@@ -156,8 +167,17 @@ async def read_root():
 
 @app.get("/api/edition", tags=["System"])
 def get_edition(current_user: CurrentUser):
-    """Текущее издание и доступность фич (open-core: oss/pro/cloud). См. ADR-019."""
-    return editions.describe()
+    """Текущее издание и доступность фич (open-core: oss/pro/cloud). См. ADR-019.
+
+    Блок `pro_features` (ADR-100) — фактическая доступность лицензионных фич СЕЙЧАС
+    (двойной гейт editions+лицензия через `pro_gate`). UI прячет PRO-кнопки, когда фича
+    False (нет лицензии / OSS-срез). Ключи — PRO-фичи из каталога; в OSS все False."""
+    info = editions.describe()
+    info["pro_features"] = {
+        name: pro_gate.pro_feature_available(name)
+        for name in ("rate_limit_ui", "abuse_shield", "api_map", "scoped_tokens")
+    }
+    return info
 
 
 @app.get("/api/version", tags=["System"])

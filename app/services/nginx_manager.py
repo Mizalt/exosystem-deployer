@@ -17,6 +17,50 @@ DEPLOYER_PORT = int(os.environ.get("DEPLOYER_PROXY_PORT", "7999"))
 RESOLVER_BLOCK = ""
 SET_HOST_VAR = ""
 
+# --- P0: САНИТАРНЫЙ RATE-LIMIT (OSS-ядро, ADR-099) ---
+#
+# Зоны limit_req/limit_conn объявляются в http-контексте. Каталог nginx_configs
+# смонтирован как /etc/nginx/conf.d и включается стоковым nginx.conf ВНУТРИ http{},
+# поэтому limit_req_zone/limit_conn_zone здесь валидны. Имя `00-zones.conf`
+# грузится по алфавиту ДО app/panel-конфигов — зоны определены к моменту ссылки.
+#
+# Дефолты — сдержанный «предохранитель»: 30r/s + burst 60 nodelay комфортны для
+# SPA/dashboard/API и режут ботов/сканеры; limit_conn 40/IP душит только явный
+# флуд; 100m не мешает обычным загрузкам, но ставит потолок. Зоны 10m ≈ ~160k IP.
+RATE_LIMIT_RATE = "30r/s"
+RATE_LIMIT_BURST = 60
+RATE_LIMIT_CONN = 40
+CLIENT_MAX_BODY_SIZE = "100m"
+
+ZONES_CONFIG_TEMPLATE = f"""# Сгенерировано EXOSYSTEM DEPLOY (P0 rate-limit, ADR-099). Не редактировать вручную.
+limit_req_zone $binary_remote_addr zone=app_rl:10m rate={RATE_LIMIT_RATE};
+limit_conn_zone $binary_remote_addr zone=app_conn:10m;
+"""
+
+def rate_limit_directives(burst: int | None = None, conn: int | None = None,
+                          body_size: str | None = None) -> str:
+    """Директивы лимитов для location / app-домена.
+
+    P0 (дефолт, все аргументы None) → сдержанный «предохранитель». P1/PRO
+    (демо-фича `rate_limit_ui`) вызывает с per-app значениями, перекрывая дефолты для
+    конкретного приложения — поэтому генерация конфига параметризована здесь, а не
+    жёстко зашита строкой. Зоны (`app_rl`/`app_conn`) общие (объявлены в 00-zones.conf),
+    per-app меняется только burst/limit_conn/client_max_body_size в самом location.
+    """
+    burst = RATE_LIMIT_BURST if burst is None else burst
+    conn = RATE_LIMIT_CONN if conn is None else conn
+    body_size = CLIENT_MAX_BODY_SIZE if body_size is None else body_size
+    return (
+        f"limit_req zone=app_rl burst={burst} nodelay; "
+        f"limit_conn app_conn {conn}; "
+        f"client_max_body_size {body_size};"
+    )
+
+
+# Директивы лимитов по умолчанию (P0). Оставлено как константа для обратной
+# совместимости кода/тестов, ссылавшихся на неё; эквивалентно rate_limit_directives().
+RATE_LIMIT_DIRECTIVES = rate_limit_directives()
+
 # --- КОНФИГУРАЦИЯ CATCHALL И ЗАГЛУШКИ SSL ---
 
 # Заглушка SSL для default_server (нужна, чтобы Nginx стартовал с listen 443 default_server)
@@ -95,6 +139,24 @@ def _write_catchall_if_changed() -> bool:
     return False
 
 
+def _write_zones_if_changed() -> bool:
+    """Идемпотентно (пере)записывает 00-zones.conf с http-зонами rate-limit (P0).
+
+    По образцу `_write_catchall_if_changed`: сравнить с шаблоном → перезаписать при
+    отличии → вернуть True, если файл реально изменился (значит нужен reload). Файл
+    грузится по алфавиту ДО app/panel-конфигов — зоны определены к моменту ссылки на
+    них из location-блоков приложений. Появляется и на уже установленных нодах, т.к.
+    вызывается на старте деплоера и в update_panel_nginx_config.
+    """
+    zones_path = config.NGINX_SITES_DIR / "00-zones.conf"
+    current = zones_path.read_text(encoding="utf-8") if zones_path.exists() else None
+    if current != ZONES_CONFIG_TEMPLATE:
+        zones_path.write_text(ZONES_CONFIG_TEMPLATE, encoding="utf-8")
+        print("INFO: Rate-limit zones config written/updated.")
+        return True
+    return False
+
+
 def ensure_acme_webroot_traversable() -> None:
     """ACME-webroot должен быть ПРОХОДИМ nginx-воркером (он работает не под root).
 
@@ -132,7 +194,11 @@ def ensure_acme_challenge_ready() -> None:
     catchall изменился (права webroot reload'а не требуют).
     """
     ensure_acme_webroot_traversable()
-    if _write_catchall_if_changed():
+    # Зоны rate-limit (P0) должны существовать ДО ссылки на них из app-конфигов.
+    # Пишем идемпотентно; при изменении любого из файлов делаем reload.
+    zones_changed = _write_zones_if_changed()
+    catchall_changed = _write_catchall_if_changed()
+    if zones_changed or catchall_changed:
         reload_nginx()
 
 
@@ -167,14 +233,35 @@ def _get_proxy_headers(proxy_path: str) -> str:
 def update_application_nginx_config(
         app_name: str,
         domain: str,
-        ssl_cert_name: Optional[str] = None
+        ssl_cert_name: Optional[str] = None,
+        rate_limit: Optional[dict] = None,
 ):
-    """Генерирует конфиг для пользовательского приложения."""
+    """Генерирует конфиг для пользовательского приложения.
+
+    `rate_limit` (P1/PRO демо-фича `rate_limit_ui`): per-app override `{burst, conn,
+    body_size}` поверх P0-дефолтов. None → дефолтный «предохранитель» P0 (обычный путь
+    ядра/OSS). Значения приезжают из `data/pro/rate_limits.json` через PRO-роутер под
+    валидной лицензией — само ядро дефолты не меняет.
+    """
     config_path = config.NGINX_SITES_DIR / f"{app_name}.conf"
 
     # Путь для проксирования приложений
     app_proxy_path = f"/api/proxy/{app_name}/"
     proxy_headers = _get_proxy_headers(app_proxy_path)
+
+    rl = rate_limit or {}
+    directives = rate_limit_directives(
+        burst=rl.get("burst"), conn=rl.get("conn"), body_size=rl.get("body_size"))
+
+    # P0: санитарный rate-limit — только в proxy-location `/`, где реально идёт
+    #     трафик приложения. НЕ добавляем в ACME-location (отдельный location без
+    #     proxy) — выпуск/продление SSL не лимитируется. При ssl_cert_name HTTP-блок
+    #     только редиректит (301), лимиты не нужны → вешаем их на HTTPS-блок ниже.
+    http_location_body = (
+        "return 301 https://$host$request_uri;"
+        if ssl_cert_name
+        else f"{directives}\n{proxy_headers}"
+    )
 
     # HTTP блок
     http_block = f"""
@@ -187,7 +274,7 @@ server {{
     }}
 
     location / {{
-        {'return 301 https://$host$request_uri;' if ssl_cert_name else proxy_headers}
+        {http_location_body}
     }}
 }}"""
 
@@ -205,6 +292,7 @@ server {{
     ssl_certificate_key {key_path};
 
     location / {{
+        {directives}
         {proxy_headers}
     }}
 }}"""
@@ -226,6 +314,9 @@ def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):
     #    Reload здесь не делаем — его выполнит caller (общий для catchall и panel).
     #    Заодно чиним права webroot (umask-077 footgun) — ещё на старте деплоера.
     ensure_acme_webroot_traversable()
+    # P0: гарантируем наличие http-зон rate-limit (появляются и на старых нодах при
+    #     следующем сохранении настроек панели). Reload — общий, его сделает caller.
+    _write_zones_if_changed()
     _write_catchall_if_changed()
 
     panel_config_path = config.NGINX_SITES_DIR / "10-panel.conf"
