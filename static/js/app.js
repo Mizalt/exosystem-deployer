@@ -182,6 +182,9 @@ document.addEventListener('DOMContentLoaded', () => {
         navigate(initialPage);
         startPolling();  // live-обновление статусов/логов
         initTaskCenter();  // центр фоновых задач (Ночь 10, ADR-069)
+        // ИИ-помощник панели (ADR-103): монтируется САМ только в embedded-режиме
+        // (панель внутри ЛК) И когда нода отдала ai-availability=true; иначе no-op.
+        if (window.PanelAI && window.PanelAI.init) window.PanelAI.init();
     };
 
     // Обработчики submit модалок раньше навешивались только в init-функциях стадий;
@@ -236,6 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearToken();
         invalidateCache('groups', 'blueprints', 'services', 'applications', 'certs');
         teardownTaskCenter();
+        if (window.PanelAI && window.PanelAI.teardown) window.PanelAI.teardown();
         showLoginScreen();
     });
 
