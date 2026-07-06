@@ -16,7 +16,7 @@ from app import editions
 
 # Semver сборки деплоера. Бампать при значимых изменениях API/поведения. На проде
 # может переопределяться env `DEPLOYER_VERSION` (напр. проставляется при сборке образа).
-VERSION = "0.16.0"
+VERSION = "0.18.0"
 
 # Минимальная версия, на которую БЕЗОПАСЕН откат из UI (страж даунгрейда, Ночь 16,
 # ADR-085). Миграции ноды forward-only: ниже 0.11.0 нет самого механизма
@@ -47,6 +47,8 @@ CAPABILITIES = (
     "metrics_history",  # история метрик хоста: GET /api/system/metrics/history (Ночь 19)
     "terminal_exec",    # веб-терминал: POST /api/admin/exec (одна команда → вывод, ADR-090)
     "panel_embed",      # панель внутри ЛК: CSP frame-ancestors по пушу origin (ADR-092)
+    "rate_limit",       # санитарный rate-limit nginx в ядре: зоны+limit_req/conn (P0, ADR-099)
+    "pro_license",      # приём/рефреш/отзыв PRO-лицензии: POST /api/pro/license[/revoke] (P1, ADR-100)
 )
 
 

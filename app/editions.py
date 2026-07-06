@@ -37,6 +37,11 @@ _FEATURE_TIER = {
     "audit_log": PRO,             # журнал действий администратора
     "backups": PRO,               # бэкапы БД/состояния
     "priority_support": PRO,
+    # Pro-каталог v1 (ADR-099/ADR-100) — гейтятся ещё и лицензией (pro_gate, второй гейт):
+    "rate_limit_ui": PRO,         # управление rate-limit из UI (демо-фича сквозного гейта, P1)
+    "abuse_shield": PRO,          # Щит приложений: per-app профили/автобан (P4)
+    "api_map": PRO,               # Карта API: анализатор эндпоинтов (P5)
+    "scoped_tokens": PRO,         # роли панели + scoped-токены (P6)
     # Cloud (managed, наш хостинг):
     "multi_tenancy": CLOUD,       # изоляция арендаторов
     "billing": CLOUD,             # тарификация/подписки

@@ -11,7 +11,8 @@ def test_describe_shape_and_capabilities():
     assert d["version"] == version.get_version()
     assert isinstance(d["capabilities"], list)
     # Ключевые фичи текущей сборки объявлены как capabilities.
-    for cap in ("version", "pending_actions", "apex_publish", "sso_redeem", "admin_recover"):
+    for cap in ("version", "pending_actions", "apex_publish", "sso_redeem", "admin_recover",
+                "rate_limit", "pro_license"):
         assert cap in d["capabilities"]
     # Отсортировано и без дублей — детерминированно для UI/тестов.
     assert d["capabilities"] == sorted(set(d["capabilities"]))
