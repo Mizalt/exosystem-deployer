@@ -324,6 +324,27 @@ def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):
 
     proxy_headers = _get_proxy_headers(proxy_path="/")
 
+    # Панель проксирует POST /api/blueprints/{id}/artifacts (публикация проекта ЛК:
+    # мультифайл-сайт с картинками — легально до ~32 МБ: PUBLISH_MAX_BYTES текста +
+    # PUBLISH_MAX_ASSET_BYTES ассетов). Без client_max_body_size у location панели
+    # nginx берёт дефолт 1 МБ и режет ZIP «413 Request Entity Too Large» ДО FastAPI
+    # (у деплоера MAX_ARTIFACT_BYTES=150 МБ, он не при чём). Ставим CLIENT_MAX_BODY_SIZE
+    # (100 МБ): ≥ ЛК-максимума ~32 МБ и ≤ потолка деплоера 150 МБ — цепочка согласована.
+    #
+    # ⚠️ Но панель — НЕ только доверенный трафик ЛК: домен панели обслуживает и
+    # ПУБЛИЧНЫЙ неаутентифицированный POST /api/auth/token (форма спулится ДО
+    # login_limiter — тот считает лишь неудачи логина, размер/частоту тела не режет).
+    # Поднять потолок тела до 100 МБ без conn/req-лимита = усилить flood/slow-body-DoS
+    # на публичный вход (app-домены при том же 100m прикрыты limit_req/limit_conn —
+    # держим панель симметрично). Санитарный предохранитель ЛК не мешает: он не шлёт
+    # 30+ r/s и не держит 40+ конн/IP, а аноним-флудер упрётся. Зоны app_rl/app_conn
+    # объявлены в 00-zones.conf (грузится ДО 10-panel.conf), reload делает caller.
+    panel_body_limit = (
+        f"limit_req zone=app_rl burst={RATE_LIMIT_BURST} nodelay; "
+        f"limit_conn app_conn {RATE_LIMIT_CONN}; "
+        f"client_max_body_size {CLIENT_MAX_BODY_SIZE};"
+    )
+
     # --- ЛОГИКА ГЕНЕРАЦИИ ---
     if not domain:
         # Если домен не указан, создаем временный конфиг для доступа по IP
@@ -341,7 +362,7 @@ server {{
     listen 80;
     server_name _; # Используем _ для ловли по IP, но catchall имеет приоритет
     location /.well-known/acme-challenge/ {{ root /var/www/acme_challenge; }}
-    location / {{ {proxy_headers} }}
+    location / {{ {panel_body_limit} {proxy_headers} }}
 }}"""
         # ВНИМАНИЕ: В этой схеме доступ по IP будет ловиться catchall.conf (возврат 403).
         # Чтобы разрешить доступ по IP, нужно либо:
@@ -376,7 +397,7 @@ server {{
     server_name {domain};
     ssl_certificate {cert_path};
     ssl_certificate_key {key_path};
-    location / {{ {proxy_headers} }}
+    location / {{ {panel_body_limit} {proxy_headers} }}
 }}"""
     else:
         # Только HTTP для заданного домена
@@ -385,7 +406,7 @@ server {{
     listen 80;
     server_name {domain};
     location /.well-known/acme-challenge/ {{ root /var/www/acme_challenge; }}
-    location / {{ {proxy_headers} }}
+    location / {{ {panel_body_limit} {proxy_headers} }}
 }}"""
 
     panel_config_path.write_text(content.strip(), encoding="utf-8")
