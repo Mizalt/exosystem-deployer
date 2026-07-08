@@ -73,6 +73,17 @@
     });
   }
 
+  // «Написать в поддержку»: поддержка/тикеты живут в мессенджере ЛК, а он в embed
+  // спрятан. Шлём родителю-ЛК односторонний сигнал (ответа не ждём) на ТОТ ЖЕ
+  // известный origin, что и запросы ИИ (не '*') — ЛК уйдёт с embed-вьюхи и откроет
+  // мессенджер на экране поддержки. Никаких URL/данных не передаём: чистый триггер.
+  function openSupport() {
+    if (!aiOrigin || window.parent === window) return;
+    try {
+      window.parent.postMessage({ type: 'panel-support' }, aiOrigin);
+    } catch (_) { /* родитель ушёл — молча */ }
+  }
+
   window.addEventListener('message', function (event) {
     // Принимаем ТОЛЬКО ответы от известного origin ЛК-родителя (анти-спуфинг).
     if (!aiOrigin || event.origin !== aiOrigin) return;
@@ -146,6 +157,8 @@
       + '      <span class="pai-head-sub">подскажет по этой панели</span></div>'
       + '    <button class="icon-btn" id="paiClearBtn" type="button" title="Очистить диалог" hidden>'
       + '      <span class="material-symbols-outlined">delete_sweep</span></button>'
+      + '    <button class="icon-btn" id="paiSupportBtn" type="button" title="Написать в поддержку">'
+      + '      <span class="material-symbols-outlined">support_agent</span></button>'
       + '    <button class="icon-btn" id="paiExpandBtn" type="button" title="На весь экран">'
       + '      <span class="material-symbols-outlined">open_in_full</span></button>'
       + '    <button class="icon-btn" id="paiCloseBtn" type="button" title="Свернуть">'
@@ -169,7 +182,13 @@
       setMode(mode === 'full' ? 'corner' : 'full');
     });
     $('paiClearBtn').addEventListener('click', clearDialog);
+    $('paiSupportBtn').addEventListener('click', openSupport);
     $('paiForm').addEventListener('submit', function (e) { e.preventDefault(); send(); });
+
+    // Резервное закрытие: Escape сворачивает открытый чат (страховка к крестику).
+    $('paiPanel').addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && mode !== 'closed') { e.stopPropagation(); setMode('closed'); }
+    });
 
     var ta = $('paiText');
     try { ta.value = sessionStorage.getItem(DRAFT_KEY) || ''; } catch (_) { /* ignore */ }
