@@ -4,6 +4,7 @@ import docker
 import zipfile
 import tempfile
 import hashlib
+import os
 import socket
 from pathlib import Path
 
@@ -55,6 +56,50 @@ IMAGE_REPO = "deployer-cache"
 # быть syslog/journald/none без поддержки чтения.
 APP_LOG_CONFIG = docker.types.LogConfig(
     type="json-file", config={"max-size": "10m", "max-file": "3"})
+
+# Ресурс-лимиты app-контейнеров (ADR «ресурс-лимиты app-контейнеров»). До этого
+# `containers.run(...)` запускался БЕЗ mem_limit/nano_cpus/pids_limit — пользовательский
+# backend-код (студия кода, ADR-110: сервисы юзера на его single-tenant ноде) мог
+# форк-бомбой/утечкой памяти положить всю ноду. Задаём разумные дефолты для ВСЕХ
+# app-контейнеров (design Р-4, fallback «все с разумным дефолтом»).
+#
+# 🔴 Дефолт памяти = 1 ГБ, а не 512 МБ: лимит применяется КО ВСЕМ контейнерам ноды
+# (webapp из репо / Next.js SSR / JVM / Django с воркерами), не только к сервисам
+# студии. 512 МБ реально мало для SSR-Node/JVM — на реконсайле существующий тяжёлый
+# деплой пересобрался бы уже с лимитом и начал бы падать по OOM. 1 ГБ безопаснее для
+# «годами работавших» приложений, но всё ещё держит форк-бомбу/утечку от смерти ноды.
+#
+# 🔴 ВСЕ ТРИ лимита env-переопределяемы (opt-out/тюнинг по тарифу без правки кода):
+#   DEPLOYER_APP_MEM_LIMIT (напр. "2g"; пусто/"0"/"none" → БЕЗ лимита памяти),
+#   DEPLOYER_APP_NANO_CPUS (целое nano_cpus; "0" → без CPU-лимита),
+#   DEPLOYER_APP_PIDS_LIMIT (целое; "0"/отрицательное → без pids-лимита).
+# Оператор ноды с тяжёлым приложением может поднять/снять лимит, не патча ядро.
+
+
+def _env_mem_limit(default: str) -> str | None:
+    raw = os.environ.get("DEPLOYER_APP_MEM_LIMIT")
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "" or raw.lower() in ("0", "none", "off"):
+        return None  # docker-py: mem_limit=None → без лимита памяти
+    return raw
+
+
+def _env_int_limit(name: str, default: int) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = int(raw.strip())
+    except (TypeError, ValueError):
+        return default  # мусор в env → безопасный дефолт, не роняем деплой
+    return val if val > 0 else None  # ≤0 → снять лимит
+
+
+APP_MEM_LIMIT = _env_mem_limit("1g")   # ≤1 ГБ RAM/контейнер (OOM-kill вместо смерти ноды)
+APP_NANO_CPUS = _env_int_limit("DEPLOYER_APP_NANO_CPUS", 1_000_000_000)  # 1.0 CPU
+APP_PIDS_LIMIT = _env_int_limit("DEPLOYER_APP_PIDS_LIMIT", 256)  # ≤256 PID (анти форк-бомба)
 
 
 def compute_image_tag(base_key: str, build_config: dict = None) -> str:
@@ -255,6 +300,13 @@ def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_
             detach=True,
             restart_policy={"Name": "unless-stopped"},
             environment=env_vars or None,  # env-переменные рантайма (Идея 2а)
+            # Ресурс-лимиты (ADR «ресурс-лимиты app-контейнеров»): щедрые дефолты для
+            # ВСЕХ app-контейнеров, чтобы форк-бомба/утечка памяти пользовательского
+            # backend-кода (сервисы студии, ADR-110) не положила ноду. nginx/бот/webapp
+            # умещаются с запасом — регрессии нет.
+            mem_limit=APP_MEM_LIMIT,
+            nano_cpus=APP_NANO_CPUS,
+            pids_limit=APP_PIDS_LIMIT,
             # Явный json-file c ротацией на КАЖДОМ app-контейнере (ADR-076):
             # 1) `docker logs`/наша диагностика читаются ВСЕГДА, даже если у хоста
             #    дефолтный logging-драйвер без чтения (была «configured logging driver
