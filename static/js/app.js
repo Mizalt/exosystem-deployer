@@ -935,7 +935,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('drwRedeploy').onclick = () => { closeDrawer(); showModal('redeployModal', () => prepareRedeployModal(svc)); };
         document.getElementById('drwConfig').onclick = () => { closeDrawer(); showModal('configModal', () => prepareConfigModal(svc)); };
         document.getElementById('drwPublish').onclick = () => { closeDrawer(); showModal('applicationModal', () => prepareApplicationModal({ serviceId: svc.id })); };
-        document.getElementById('drwDelete').onclick = () => { if (confirm(`Удалить сервис «${svc.name}»? Контейнер будет удалён.`)) deleteJSON(`/api/services/${id}`, 'Сервис удалён.', afterDelete); };
+        document.getElementById('drwDelete').onclick = async () => { closeDrawer(); if (await panelConfirm(`Удалить сервис «${svc.name}»? Контейнер будет удалён.`, { danger: true })) deleteJSON(`/api/services/${id}`, 'Сервис удалён.', afterDelete); };
         document.getElementById('drwScale').onclick = () => { const n = parseInt(document.getElementById('drwReplicas').value, 10); if (Number.isNaN(n)) return; postJSON(null, `/api/services/${id}/scale`, { target_replicas: n }, `Масштаб → ${n} реплик(и)`, afterAction); };
         if (online) authGet(`/api/services/${id}/stats`).then(s => { const c = document.getElementById('drwCpu'); if (c) { c.textContent = `${s.cpu_percent}%`; document.getElementById('drwMem').textContent = `${s.memory_usage_mb} MB`; } }).catch(() => {});
         // Логи и диагностику тянем всегда — в т.ч. для failed/offline (почему умер/не запускается).
@@ -987,7 +987,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('drwEdit').onclick = () => { closeDrawer(); openEditApplicationModal(app); };
         const sslBtn = document.getElementById('drwSsl');
         if (sslBtn) sslBtn.onclick = () => { closeDrawer(); handleIssueAppSsl(app.id, app.domain); };
-        document.getElementById('drwDelete').onclick = () => { if (confirm(`Удалить приложение (снять с публикации) «${app.name}»?`)) deleteJSON(`/api/applications/${app.id}`, 'Приложение удалено.', () => { invalidateCache('applications', 'systemMetrics'); closeDrawer(); }); };
+        document.getElementById('drwDelete').onclick = async () => { closeDrawer(); if (await panelConfirm(`Удалить приложение (снять с публикации) «${app.name}»?`, { danger: true })) deleteJSON(`/api/applications/${app.id}`, 'Приложение удалено.', () => { invalidateCache('applications', 'systemMetrics'); closeDrawer(); }); };
     }
 
     // --- Инициализация Страниц ---
@@ -1142,15 +1142,15 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const form = e.target;
         const token = form.elements.token.value.trim();
-        if (!token) { alert('Введите токен.'); return; }
+        if (!token) { panelAlert('Введите токен.'); return; }
         await postJSON(form, '/api/integrations/github', { token }, "GitHub подключён!", () => {
             form.reset();
             invalidateCache('githubStatus', 'githubRepos');
             loadGithubIntegration();
         });
     }
-    function handleGithubDisconnect() {
-        if (!confirm('Отключить GitHub-аккаунт? Импорт приватных репозиториев станет недоступен.')) return;
+    async function handleGithubDisconnect() {
+        if (!await panelConfirm('Отключить GitHub-аккаунт? Импорт приватных репозиториев станет недоступен.', { danger: true })) return;
         deleteJSON('/api/integrations/github', 'GitHub отключён.', () => {
             invalidateCache('githubStatus', 'githubRepos');
             loadGithubIntegration();
@@ -1165,7 +1165,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const domain = (panelForm.elements.domain.value || '').trim() || null;
         const mode = document.getElementById('panelSslMode').value;
         const btn = panelForm.querySelector('button[type="submit"]');
-        if (!domain && mode !== 'none') { alert('Укажите домен панели для выпуска/привязки SSL.'); return; }
+        if (!domain && mode !== 'none') { panelAlert('Укажите домен панели для выпуска/привязки SSL.'); return; }
 
         let sslCertName = null;
         if (mode === 'existing') {
@@ -1191,7 +1191,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderFirstAccessBanner(domain);
             if (domain && domain !== window.location.hostname) {
                 const url = `${sslCertName ? 'https' : 'http'}://${domain}`;
-                alert(`Панель теперь доступна по адресу: ${url}` + (sslCertName ? `\n\nГотово! Не забудьте закрыть первичный доступ (порт 7999) на сервере:\nsh /opt/exosystem-deployer/close-initial-access.sh` : ''));
+                panelAlert(`Панель теперь доступна по адресу: ${url}` + (sslCertName ? `\n\nГотово! Не забудьте закрыть первичный доступ (порт 7999) на сервере:\nsh /opt/exosystem-deployer/close-initial-access.sh` : ''));
             }
         });
     }
@@ -1224,13 +1224,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response.status !== 204 && response.headers.get("content-type")?.includes("application/json")) {
                 json_body = await response.json();
             }
-            if (successMsg) alert(successMsg);
+            if (successMsg) panelAlert(successMsg);
             if (callback) callback();
             maybeRefreshDashboard(options.method);
 
             return json_body;
         } catch (err) {
-            alert(`Ошибка: ${err.message}`);
+            panelAlert(`Ошибка: ${err.message}`);
             throw err;
         } finally {
             if (btn) { btn.disabled = false; btn.textContent = btn.dataset.originalText || 'Submit'; }
@@ -1504,11 +1504,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     async function handleBlueprintDelete(id, name) {
-        if (!confirm(`Удалить приложение "${name}" из библиотеки вместе со всеми версиями?\n\nНельзя удалить, если на него есть запущенные сервисы.`)) return;
+        if (!await panelConfirm(`Удалить приложение "${name}" из библиотеки вместе со всеми версиями?\n\nНельзя удалить, если на него есть запущенные сервисы.`, { danger: true })) return;
         await deleteJSON(`/api/blueprints/${id}`, "Приложение удалено.", () => { invalidateCache('blueprints'); loadAndDisplayBlueprints(); });
     }
     async function handleArtifactDelete(bpId, artId, tag) {
-        if (!confirm(`Удалить версию "${tag}"?\n\nНельзя удалить, если версия используется запущенным сервисом.`)) return;
+        if (!await panelConfirm(`Удалить версию "${tag}"?\n\nНельзя удалить, если версия используется запущенным сервисом.`, { danger: true })) return;
         await deleteJSON(`/api/blueprints/${bpId}/artifacts/${artId}`, "Версия удалена.", () => { invalidateCache('blueprints'); loadAndDisplayBlueprints(); });
     }
     // Генерирует уникальное имя на основе base, избегая занятых (existing — массив строк).
@@ -1592,7 +1592,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const done = () => { hideModal('uploadArtifactModal'); invalidateCache('blueprints'); loadAndDisplayBlueprints(); };
         if ((form.dataset.src || 'zip') === 'github') {
             const repoUrl = form.elements.repo_url.value.trim();
-            if (!repoUrl) { alert('Укажите URL публичного GitHub-репозитория.'); return; }
+            if (!repoUrl) { panelAlert('Укажите URL публичного GitHub-репозитория.'); return; }
             const data = {
                 repo_url: repoUrl,
                 ref: form.elements.ref.value.trim() || null,
@@ -1601,7 +1601,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             await postJSON(form, `/api/blueprints/${blueprintId}/artifacts/from-github`, data, "Версия импортирована из GitHub!", done);
         } else {
-            if (!form.elements.zip_file.files.length) { alert('Выберите ZIP-архив с кодом.'); return; }
+            if (!form.elements.zip_file.files.length) { panelAlert('Выберите ZIP-архив с кодом.'); return; }
             await postForm(form, `/api/blueprints/${blueprintId}/artifacts`, new FormData(form), "Версия успешно загружена!", done);
         }
     }
@@ -1618,7 +1618,7 @@ document.addEventListener('DOMContentLoaded', () => {
             a.href = url; a.download = filename;
             document.body.appendChild(a); a.click(); a.remove();
             URL.revokeObjectURL(url);
-        } catch (err) { alert(`Ошибка скачивания: ${err.message}`); }
+        } catch (err) { panelAlert(`Ошибка скачивания: ${err.message}`); }
     }
     // «~40 с» / «~3 мин» / «~1 ч» — оценка оставшегося времени (Ночь 14).
     function fmtEta(sec) {
@@ -1689,7 +1689,7 @@ document.addEventListener('DOMContentLoaded', () => {
             syncKeyedList(host, services, s => s.id, serviceSig, buildServiceCard);
         } catch (error) { if (getToken()) container.innerHTML = `<p style="color:var(--danger)">Ошибка загрузки сервисов.</p>`; }
     }
-    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; card.dataset.sig = 'action-pending'; /* руками менял DOM → следующий дифф обязан пересоздать карточку */ await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'config': showModal('configModal', () => prepareConfigModal(service)); break; case 'publish': goToStage('applications', () => showModal('applicationModal', () => prepareApplicationModal({ serviceId: service.id }))); break; case 'delete': if (confirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`)) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); }); } break; } }
+    async function handleServiceAction(action, service, card) { switch (action) { case 'start': case 'stop': case 'restart': card.querySelector('.status-dot').className = 'status-dot restarting'; card.dataset.sig = 'action-pending'; /* руками менял DOM → следующий дифф обязан пересоздать карточку */ await postJSON(null, `/api/services/${service.id}/${action}`, null, `Действие '${action}' выполнено.`, () => { invalidateCache('services'); loadAndDisplayServices(); }); break; case 'redeploy': showModal('redeployModal', () => prepareRedeployModal(service)); break; case 'config': showModal('configModal', () => prepareConfigModal(service)); break; case 'publish': goToStage('applications', () => showModal('applicationModal', () => prepareApplicationModal({ serviceId: service.id }))); break; case 'delete': if (await panelConfirm(`Вы уверены, что хотите ПОЛНОСТЬЮ удалить сервис "${service.name}"?\n\nЭто действие необратимо и приведет к удалению контейнера.`, { danger: true })) { await deleteJSON(`/api/services/${service.id}`, "Сервис успешно удален.", () => { invalidateCache('services'); loadAndDisplayServices(); }); } break; } }
     async function handleCreateService(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); data.artifact_id = parseInt(data.artifact_id); await postJSON(form, '/api/services', data, "Сервис успешно запущен!", () => { hideModal('serviceModal'); invalidateCache('services'); loadAndDisplayServices(); }); }
     // Потоковый редеплой с ЖИВЫМ WS-логом сборки (ADR-023). Зеркалит issueSslForDomain.
     function streamRedeploy(serviceId, artifactId, logWindow) {
@@ -1772,7 +1772,7 @@ document.addEventListener('DOMContentLoaded', () => {
             syncKeyedList(tableBody, apps, a => a.id, a => JSON.stringify(a), buildAppRow);
         } catch (error) { if (getToken()) { delete tableBody.dataset.empty; tableBody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Ошибка загрузки приложений.</td></tr>`; } }
     }
-    async function handleApplicationDelete(appId, appName) { if (!confirm(`Вы уверены, что хотите удалить приложение (снять с публикации) "${appName}"?\n\nЭто действие НЕ остановит работающий сервис, а только уберет публичный доступ к нему.`)) return; await deleteJSON(`/api/applications/${appId}`, "Приложение успешно удалено.", () => { invalidateCache('applications'); loadAndDisplayApplications(); }); }
+    async function handleApplicationDelete(appId, appName) { if (!await panelConfirm(`Вы уверены, что хотите удалить приложение (снять с публикации) "${appName}"?\n\nЭто действие НЕ остановит работающий сервис, а только уберет публичный доступ к нему.`, { danger: true })) return; await deleteJSON(`/api/applications/${appId}`, "Приложение успешно удалено.", () => { invalidateCache('applications'); loadAndDisplayApplications(); }); }
     async function openEditApplicationModal(app) {
         const form = document.getElementById('editApplicationForm');
         form.reset();
@@ -1796,7 +1796,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Выпуск SSL для уже опубликованного приложения — в ФОН (Ночь 10): задача сама
     // дождётся DNS, выпустит сертификат и привяжет его. Страницу можно закрыть.
     async function handleIssueAppSsl(appId, domain) {
-        if (!confirm(`Выпустить Let's Encrypt сертификат для "${domain}" в фоне?\n\nЗадача сама дождётся распространения DNS и выпустит сертификат — можно закрыть страницу и следить в центре задач.`)) return;
+        if (!await panelConfirm(`Выпустить Let's Encrypt сертификат для "${domain}" в фоне?\n\nЗадача сама дождётся распространения DNS и выпустит сертификат — можно закрыть страницу и следить в центре задач.`)) return;
         try {
             await postJSON(null, '/api/pending-actions/issue-ssl', { domain, app_id: appId });
             openTaskCenter();
@@ -1810,7 +1810,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const mode = raw.ssl_mode;
         const domainMode = document.getElementById('appDomainGroup').dataset.mode || 'manual';
         const domain = currentAppDomain();
-        if (!domain) { alert('Укажите домен (или субдомен и зону).'); return; }
+        if (!domain) { panelAlert('Укажите домен (или субдомен и зону).'); return; }
         const serviceId = parseInt(raw.service_id);
         const name = (raw.name || '').trim();
 
@@ -1893,7 +1893,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
     async function handleCertUpload(e) { e.preventDefault(); await postForm(e.target, '/api/ssl/certificates', new FormData(e.target), "Сертификат загружен!", () => { e.target.reset(); invalidateCache('certs'); loadAndDisplayCerts(); }); }
-    async function handleCertDelete(certName) { if (!confirm(`Удалить сертификат "${certName}"?`)) return; await deleteJSON(`/api/ssl/certificates/${certName}`, "Сертификат удален.", () => { invalidateCache('certs'); loadAndDisplayCerts(); }); }
+    async function handleCertDelete(certName) { if (!await panelConfirm(`Удалить сертификат "${certName}"?`, { danger: true })) return; await deleteJSON(`/api/ssl/certificates/${certName}`, "Сертификат удален.", () => { invalidateCache('certs'); loadAndDisplayCerts(); }); }
     // Общий поток выпуска Let's Encrypt: POST /issue → WebSocket-лог → проверка появления
     // сертификата. Резолвится при успехе, реджектится если сертификат не появился.
     // logWindow — опциональный DOM-элемент для трансляции логов.
@@ -1933,8 +1933,8 @@ document.addEventListener('DOMContentLoaded', () => {
         finally { btn.disabled = false; invalidateCache('certs'); loadAndDisplayCerts(); }
     }
     async function loadAndDisplayGroups() { const tableBody = document.querySelector('#groupsTable tbody'); try { const groups = await fetchData('groups', '/api/groups'); if (groups.length === 0) { tableBody.innerHTML = `<tr><td colspan="3" style="text-align:center; color:var(--text-secondary);">Группы не созданы.</td></tr>`; return; } tableBody.innerHTML = groups.map(g => `<tr><td>${escapeHTML(g.name)}</td><td><span class="mono">${g.start_port} - ${g.end_port}</span></td><td><button class="icon-btn danger" data-group-id="${g.id}" data-group-name="${g.name}"><span class="material-symbols-outlined">delete</span></button></td></tr>`).join(''); tableBody.querySelectorAll('[data-group-id]').forEach(btn => { btn.onclick = () => handleGroupDelete(btn.dataset.groupId, btn.dataset.groupName); }); } catch (error) { if (getToken()) tableBody.innerHTML = `<tr><td colspan="3" style="color:var(--danger)">Ошибка загрузки.</td></tr>`; } }
-    async function handleCreateGroup(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); if (parseInt(data.start_port) >= parseInt(data.end_port)) { alert("Начальный порт должен быть меньше конечного."); return; } await postJSON(form, '/api/groups', data, "Группа создана!", () => { invalidateCache('groups'); loadAndDisplayGroups(); form.reset(); }); }
-    async function handleGroupDelete(groupId, groupName) { if (!confirm(`Удалить группу "${groupName}"?`)) return; await deleteJSON(`/api/groups/${groupId}`, "Группа удалена.", () => { invalidateCache('groups'); loadAndDisplayGroups(); }); }
+    async function handleCreateGroup(e) { e.preventDefault(); const form = e.target; const data = formToJSON(form); if (parseInt(data.start_port) >= parseInt(data.end_port)) { panelAlert("Начальный порт должен быть меньше конечного."); return; } await postJSON(form, '/api/groups', data, "Группа создана!", () => { invalidateCache('groups'); loadAndDisplayGroups(); form.reset(); }); }
+    async function handleGroupDelete(groupId, groupName) { if (!await panelConfirm(`Удалить группу "${groupName}"?`, { danger: true })) return; await deleteJSON(`/api/groups/${groupId}`, "Группа удалена.", () => { invalidateCache('groups'); loadAndDisplayGroups(); }); }
     async function prepareServiceModal(prefill = null) {
         const form = document.getElementById('serviceForm');
         form.reset();
@@ -2388,6 +2388,70 @@ document.addEventListener('DOMContentLoaded', () => {
         // Модалка блокировала тики (см. pollTick) — закрылась → сразу догоняем правду.
         setTimeout(() => { try { pollTick(); } catch (_) { /* тихо */ } }, 250);
     };
+
+    // --- Кастомные диалоги подтверждения/уведомления (ADR-092) ---------------- //
+    // Панель встроена в iframe ЛК с sandbox БЕЗ allow-modals → нативные
+    // confirm()/alert()/prompt() браузер молча игнорирует («Ignored call to
+    // 'confirm()'. The document is sandboxed…») и подтверждение не срабатывает.
+    // Свой промис-based диалог рисуется в DOM панели и работает внутри sandbox
+    // без ослабления его keyword-ов. Реюзаем .modal-backdrop/.modal (style.css).
+    // Текст сообщения — ТОЛЬКО через textContent (никакого innerHTML): любой
+    // недоверенный ввод (имена сервисов/приложений/доменов) не может пробить XSS.
+    let panelDialogEl = null;
+    function panelDialog({ message, confirmText, cancelText, danger }) {
+        return new Promise(resolve => {
+            if (!panelDialogEl) {
+                panelDialogEl = document.createElement('div');
+                panelDialogEl.className = 'modal-backdrop';
+                panelDialogEl.id = 'panelDialog';
+                panelDialogEl.innerHTML =
+                    '<div class="modal" style="max-width:440px">'
+                    + '<div class="modal-header"><h3 class="modal-title" id="panelDialogTitle">Подтверждение</h3></div>'
+                    + '<p id="panelDialogMsg" style="white-space:pre-wrap; margin:4px 0 4px; color:var(--text-secondary)"></p>'
+                    + '<div class="modal-footer">'
+                    + '<button type="button" class="btn btn-secondary" id="panelDialogCancel">Отмена</button>'
+                    + '<button type="button" class="btn btn-primary" id="panelDialogOk">OK</button>'
+                    + '</div></div>';
+                document.body.appendChild(panelDialogEl);
+            }
+            const okBtn = panelDialogEl.querySelector('#panelDialogOk');
+            const cancelBtn = panelDialogEl.querySelector('#panelDialogCancel');
+            // Текст — строго textContent (без innerHTML): анти-XSS для имён/доменов.
+            panelDialogEl.querySelector('#panelDialogMsg').textContent = String(message == null ? '' : message);
+            okBtn.textContent = confirmText || 'OK';
+            okBtn.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+            cancelBtn.textContent = cancelText || 'Отмена';
+            cancelBtn.style.display = cancelText === null ? 'none' : '';  // null → режим alert (одна кнопка)
+
+            let done = false;
+            const close = result => {
+                if (done) return;
+                done = true;
+                panelDialogEl.classList.remove('show');
+                document.removeEventListener('keydown', onKey, true);
+                okBtn.onclick = cancelBtn.onclick = panelDialogEl.onclick = null;
+                resolve(result);
+            };
+            const onKey = e => {
+                if (e.key === 'Escape') { e.preventDefault(); close(false); }
+                else if (e.key === 'Enter') { e.preventDefault(); close(true); }
+            };
+            okBtn.onclick = () => close(true);
+            cancelBtn.onclick = () => close(false);
+            // Клик по затемнению (вне .modal) = отмена, как у нативного confirm.
+            panelDialogEl.onclick = e => { if (e.target === panelDialogEl) close(false); };
+            document.addEventListener('keydown', onKey, true);
+            panelDialogEl.classList.add('show');
+            okBtn.focus();
+        });
+    }
+    // panelConfirm(text) → Promise<bool>: замена нативного confirm() в sandbox.
+    const panelConfirm = (message, opts = {}) => panelDialog({ message, confirmText: opts.confirmText || 'Да', cancelText: opts.cancelText || 'Отмена', danger: opts.danger });
+    // panelAlert(text) → Promise<void>: замена нативного alert() (одна кнопка).
+    const panelAlert = message => panelDialog({ message, confirmText: 'OK', cancelText: null });
+    // Экспорт для panel_ai.js (отдельный IIFE-виджет ИИ-помощника).
+    window.panelConfirm = panelConfirm;
+    window.panelAlert = panelAlert;
 
     // --- Глобальные Обработчики и Запуск ---
     // Пресет-чипы расширенной сборки: заполняют базовый образ / команду / порт в форме.

@@ -362,7 +362,9 @@
   }
 
   async function clearDialog() {
-    if (!window.confirm('Очистить историю диалога с помощником?')) return;
+    // Кастомный confirm панели (sandbox без allow-modals глушит нативный confirm).
+    var ask = window.panelConfirm || function (m) { return Promise.resolve(window.confirm(m)); };
+    if (!await ask('Очистить историю диалога с помощником?')) return;
     try {
       var resp = await callLk('clear', {});
       if (resp.status !== 200) throw new Error('clear-failed');
