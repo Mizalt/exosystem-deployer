@@ -143,6 +143,52 @@
     });
     return s;
   }
+  // GFM pipe-таблица ПОВЕРХ экранированного текста: заголовок + строка-разделитель
+  // |---|:---:| … Без строки-разделителя обычный текст с «|» таблицей НЕ считается.
+  function tableSplitRow(line) {
+    // «|» внутри [[nav:ключ|Подпись]] — часть маркера, а НЕ граница колонки:
+    // прячем под сентинел до разбиения и возвращаем в ячейках (текст уже
+    // экранирован esc(), сырой «<» в нём невозможен — коллизий нет).
+    var s = line.trim().replace(/\[\[nav:([a-z_]+)\|/g, '[[nav:$1<np>');
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    return s.split('|').map(function (c) { return c.trim().replace(/<np>/g, '|'); });
+  }
+  function tableAligns(line) {
+    // null — не разделитель; иначе массив выравниваний колонок: '' | 'c' | 'r'.
+    var s = (line || '').trim();
+    if (s.indexOf('|') === -1 || s.indexOf('-') === -1) return null;
+    var cells = tableSplitRow(s);
+    var al = [];
+    for (var i = 0; i < cells.length; i++) {
+      if (!/^:?-+:?$/.test(cells[i])) return null;
+      var l = cells[i].charAt(0) === ':';
+      var r = cells[i].charAt(cells[i].length - 1) === ':';
+      al.push(l && r ? 'c' : (r ? 'r' : ''));
+    }
+    return al.length ? al : null;
+  }
+  // Выравнивание — ТОЛЬКО фиксированные классы из закрытого набора (никаких
+  // style-атрибутов со значениями из текста ответа).
+  function tableAlignClass(a) {
+    return a === 'c' ? ' class="md-al-c"' : (a === 'r' ? ' class="md-al-r"' : '');
+  }
+  function tableHtml(header, aligns, rows) {
+    var html = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+    for (var j = 0; j < header.length; j++) {
+      html += '<th' + tableAlignClass(aligns[j] || '') + '>' + inline(header[j]) + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+    for (var r = 0; r < rows.length; r++) {
+      html += '<tr>';
+      // Лишние ячейки строки обрезаются по заголовку, недостающие — пустые.
+      for (var c = 0; c < header.length; c++) {
+        html += '<td' + tableAlignClass(aligns[c] || '') + '>' + inline(rows[r][c] || '') + '</td>';
+      }
+      html += '</tr>';
+    }
+    return html + '</tbody></table></div>';
+  }
   function mdLite(text) {
     var lines = esc(text).split(/\r?\n/);
     var out = [];
@@ -158,7 +204,19 @@
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       var m;
-      if ((m = line.match(/^[-*•]\s+(.+)$/))) {
+      var al = null;
+      if (line.indexOf('|') !== -1 && i + 1 < lines.length
+          && (al = tableAligns(lines[i + 1]))) {
+        flush();
+        var rows = [];
+        i += 1; // строка-разделитель съедена
+        while (i + 1 < lines.length && lines[i + 1].trim()
+               && lines[i + 1].indexOf('|') !== -1) {
+          rows.push(tableSplitRow(lines[i + 1]));
+          i += 1;
+        }
+        out.push(tableHtml(tableSplitRow(line), al, rows));
+      } else if ((m = line.match(/^[-*•]\s+(.+)$/))) {
         if (!list || list.type !== 'ul') { flush(); list = { type: 'ul', items: [] }; }
         list.items.push(inline(m[1]));
       } else if ((m = line.match(/^\d+[.)]\s+(.+)$/))) {
