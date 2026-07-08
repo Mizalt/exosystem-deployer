@@ -34,49 +34,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 <button class="btn btn-primary" id="newAppBtn"><span class="material-symbols-outlined">public</span>Опубликовать сервис</button>
             </div>
             <div class="page-content"><div class="settings-card"><table class="styled-table" id="appsTable"><thead><tr><th>Имя приложения</th><th>Домен</th><th>Указывает на сервис</th><th>SSL</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table></div></div>`,
-        ssl: `
-            <header><h1>SSL сертификаты</h1></header>
-            <div class="page-content">
-                <div class="tab-bar">
-                    <button class="tab active" data-tab="certs"><span class="material-symbols-outlined">verified</span>Сертификаты</button>
-                    <button class="tab" data-tab="issue"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
-                    <button class="tab" data-tab="upload"><span class="material-symbols-outlined">upload</span>Загрузить свой</button>
-                </div>
-                <div class="tab-panel active" data-panel="certs">
-                    <div class="settings-card">
-                        <p class="card-hint">Let's Encrypt-сертификаты продлеваются автоматически за ~30 дней до истечения. Если продлить не удаётся, за 14 дней появится алерт в центре задач.</p>
-                        <table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table>
-                    </div>
-                </div>
-                <div class="tab-panel" data-panel="issue">
-                    <div class="settings-card" style="max-width:560px;">
-                        <h3>Выпустить Let's Encrypt</h3>
-                        <p class="card-hint">A-запись домена должна указывать на этот сервер. Проверка идёт автоматически при вводе.</p>
-                        <form id="issueSslForm">
-                            <div class="form-group"><label>Домен</label><input type="text" name="domain" placeholder="example.com" required autocomplete="off"><div class="dns-inline" data-dns-for="sslDomain"></div></div>
-                            <button type="submit" class="btn btn-primary deploy-action"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
-                        </form>
-                        <div class="log-window" id="sslLogWindow" style="height: 250px; display: none; margin-top: 16px;"></div>
-                    </div>
-                </div>
-                <div class="tab-panel" data-panel="upload">
-                    <div class="settings-card" style="max-width:560px;">
-                        <h3>Загрузить свой сертификат</h3>
-                        <form id="uploadCertForm">
-                            <div class="form-group"><label>Имя для хранения</label><input type="text" name="name" placeholder="my-custom-cert" required pattern="^[a-zA-Z0-9._\\-]+$"></div>
-                            <div class="form-group"><label>Файл сертификата (fullchain.pem)</label><input type="file" name="cert_file" required accept=".pem,.crt"></div>
-                            <div class="form-group"><label>Приватный ключ (privkey.pem)</label><input type="file" name="key_file" required accept=".pem,.key"></div>
-                            <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">upload</span>Загрузить</button>
-                        </form>
-                    </div>
-                </div>
-            </div>`,
         settings: `
             <header><h1>Настройки</h1></header>
             <div class="page-content">
                 <div class="tab-bar">
                     <button class="tab active" data-tab="panel"><span class="material-symbols-outlined">tune</span>Панель</button>
                     <button class="tab" data-tab="ports"><span class="material-symbols-outlined">lan</span>Группы портов</button>
+                    <button class="tab" data-tab="ssl"><span class="material-symbols-outlined">shield_lock</span>SSL</button>
                     <button class="tab" data-tab="integrations"><span class="material-symbols-outlined">hub</span>Интеграции</button>
                 </div>
                 <div class="tab-panel active" data-panel="panel">
@@ -113,6 +77,42 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                         <div class="settings-card">
                             <h3>Создать новую группу</h3><form id="createGroupForm"><div class="form-group"><label>Имя группы</label><input type="text" name="name" placeholder="backend-services" required></div><div class="form-group"><label>Начальный порт</label><input type="number" name="start_port" placeholder="9001" required></div><div class="form-group"><label>Конечный порт</label><input type="number" name="end_port" placeholder="9010" required></div><button type="submit" class="btn btn-primary" style="margin-top: 8px;">Создать</button></form>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-panel" data-panel="ssl">
+                    <p class="card-hint" style="max-width:640px;">SSL-сертификаты настраиваются редко (обычно один раз при подключении домена), поэтому раздел живёт здесь, в «Настройках».</p>
+                    <div class="tab-bar">
+                        <button class="tab active" data-tab="certs"><span class="material-symbols-outlined">verified</span>Сертификаты</button>
+                        <button class="tab" data-tab="issue"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
+                        <button class="tab" data-tab="upload"><span class="material-symbols-outlined">upload</span>Загрузить свой</button>
+                    </div>
+                    <div class="tab-panel active" data-panel="certs">
+                        <div class="settings-card">
+                            <p class="card-hint">Let's Encrypt-сертификаты продлеваются автоматически за ~30 дней до истечения. Если продлить не удаётся, за 14 дней появится алерт в центре задач.</p>
+                            <table class="styled-table" id="certsTable"><thead><tr><th>Имя (каталог)</th><th>Домен (CN)</th><th>Действителен до</th><th style="text-align:right;">Действия</th></tr></thead><tbody><tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Загрузка...</td></tr></tbody></table>
+                        </div>
+                    </div>
+                    <div class="tab-panel" data-panel="issue">
+                        <div class="settings-card" style="max-width:560px;">
+                            <h3>Выпустить Let's Encrypt</h3>
+                            <p class="card-hint">A-запись домена должна указывать на этот сервер. Проверка идёт автоматически при вводе.</p>
+                            <form id="issueSslForm">
+                                <div class="form-group"><label>Домен</label><input type="text" name="domain" placeholder="example.com" required autocomplete="off"><div class="dns-inline" data-dns-for="sslDomain"></div></div>
+                                <button type="submit" class="btn btn-primary deploy-action"><span class="material-symbols-outlined">add_moderator</span>Выпустить</button>
+                            </form>
+                            <div class="log-window" id="sslLogWindow" style="height: 250px; display: none; margin-top: 16px;"></div>
+                        </div>
+                    </div>
+                    <div class="tab-panel" data-panel="upload">
+                        <div class="settings-card" style="max-width:560px;">
+                            <h3>Загрузить свой сертификат</h3>
+                            <form id="uploadCertForm">
+                                <div class="form-group"><label>Имя для хранения</label><input type="text" name="name" placeholder="my-custom-cert" required pattern="^[a-zA-Z0-9._\\-]+$"></div>
+                                <div class="form-group"><label>Файл сертификата (fullchain.pem)</label><input type="file" name="cert_file" required accept=".pem,.crt"></div>
+                                <div class="form-group"><label>Приватный ключ (privkey.pem)</label><input type="file" name="key_file" required accept=".pem,.key"></div>
+                                <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">upload</span>Загрузить</button>
+                            </form>
                         </div>
                     </div>
                 </div>
@@ -309,6 +309,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Роутер ---
     const navigate = (page) => {
+        // Обратная совместимость: SSL переехал из отдельного раздела во вкладку
+        // «Настройки» (меню воронкой — SSL настраивается редко). Старый deep-link
+        // #ssl открывает Настройки и активирует вкладку SSL.
+        let openSslTab = false;
+        if (page === 'ssl') { page = 'settings'; openSslTab = true; }
         // Прямые хэши стадий (#services и т.п.) открывают конвейер на нужной стадии
         // (обратная совместимость + переходы «Запустить»/«Опубликовать»).
         let freshPipeline = false;
@@ -319,8 +324,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             mainContent.innerHTML = templates[page] || `<p>Страница не найдена</p>`;
             enhancePasswordInputs(mainContent);  // «глаз» у паролей страницы (GitHub PAT и др.)
-            const initFunctions = { dashboard: initDashboardPage, ssl: initSslPage, settings: initSettingsPage, terminal: initTerminalPage };
+            const initFunctions = { dashboard: initDashboardPage, settings: initSettingsPage, terminal: initTerminalPage };
             if (initFunctions[page]) initFunctions[page]();
+            if (openSslTab) activateSettingsTab('ssl');  // deep-link #ssl → вкладка SSL в Настройках
         }
         document.querySelectorAll('.nav-item').forEach(link => link.classList.toggle('active', link.dataset.page === page));
     };
@@ -994,7 +1000,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const initBlueprintsPage = () => { document.getElementById('newBlueprintBtn').onclick = () => openBlueprintModal(); document.getElementById('blueprintForm').onsubmit = handleBlueprintSubmit; const upForm = document.getElementById('uploadArtifactForm'); upForm.onsubmit = handleUploadArtifact; upForm.elements.zip_file.onchange = handleArtifactFileSelected; loadAndDisplayBlueprints(); };
     const initServicesPage = () => { document.getElementById('newServiceBtn').onclick = () => showModal('serviceModal', () => prepareServiceModal()); document.getElementById('serviceForm').onsubmit = handleCreateService; document.getElementById('redeployForm').onsubmit = handleRedeployService; loadAndDisplayServices(); };
     const initApplicationsPage = () => { document.getElementById('newAppBtn').onclick = () => showModal('applicationModal', () => prepareApplicationModal()); document.getElementById('applicationForm').onsubmit = handleCreateApplication; document.getElementById('editApplicationForm').onsubmit = handleEditApplication; loadAndDisplayApplications(); };
-    const initSslPage = () => { document.getElementById('uploadCertForm').onsubmit = handleCertUpload; const issueForm = document.getElementById('issueSslForm'); issueForm.onsubmit = handleSslIssue; attachDnsCheck(issueForm.elements.domain); loadAndDisplayCerts(); };
+    // SSL-раздел живёт вкладкой внутри «Настройки» (меню воронкой). Навешивает
+    // обработчики форм сертификатов и грузит список. Зовётся из initSettingsPage.
+    const initSslTab = () => { document.getElementById('uploadCertForm').onsubmit = handleCertUpload; const issueForm = document.getElementById('issueSslForm'); issueForm.onsubmit = handleSslIssue; attachDnsCheck(issueForm.elements.domain); loadAndDisplayCerts(); };
+    // Программно активировать вкладку «Настройки» по имени (для deep-link #ssl).
+    const activateSettingsTab = (name) => {
+        const bar = document.querySelector('#main-content .page-content > .tab-bar');
+        const tab = bar && bar.querySelector(`.tab[data-tab="${name}"]`);
+        if (tab) tab.click();
+    };
     // Баннер первичного доступа (ADR-014): пока домен не задан, панель открыта по
     // IP:7999 — подсказываем задать домен и закрыть доступ после онбординга.
     const renderFirstAccessBanner = (domain) => {
@@ -1044,6 +1058,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('githubConnectForm').onsubmit = handleGithubConnect;
         document.getElementById('githubDisconnectBtn').onclick = handleGithubDisconnect;
         loadGithubIntegration();
+
+        initSslTab();  // SSL — вкладка внутри Настроек (меню воронкой)
     };
 
     // --- Терминал «для знатоков» (ADR-090): одна команда → вывод ---
@@ -2120,7 +2136,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const page = window.location.hash.replace('#', '') || 'services';
         if (currentStage === 'services' && document.getElementById('servicesContainer')) loadAndDisplayServices();
         if (currentStage === 'applications' && document.querySelector('#appsTable tbody')) loadAndDisplayApplications();
-        if (page === 'ssl' && document.querySelector('#certsTable tbody')) { lastCertsSig = ''; loadAndDisplayCerts(); }
+        if (document.querySelector('#certsTable tbody')) { lastCertsSig = ''; loadAndDisplayCerts(); }  // SSL-вкладка Настроек
         if (page === 'dashboard') { invalidateCache('systemMetrics'); renderDashboard(); }
     }
 
@@ -2327,7 +2343,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const onServices = currentStage === 'services' && document.getElementById('servicesContainer');
         const onApplications = currentStage === 'applications' && document.querySelector('#appsTable tbody');
         const onDashboard = page === 'dashboard';
-        const onSsl = page === 'ssl' && document.querySelector('#certsTable tbody');
+        const onSsl = !!document.querySelector('#certsTable tbody');  // SSL-вкладка Настроек
         try {
             if (onServices || onDashboard) {
                 invalidateCache('services');
