@@ -12,7 +12,13 @@
    для .task-center-panel в ядре style.css). Возвращаем скрытие с приоритетом. */
 .pai-fab[hidden],
 .pai-panel[hidden],
+.pai-screen[hidden],
+.pai-closed-row[hidden],
+.pai-input[hidden],
 .pai-head .icon-btn[hidden] { display: none !important; }
+
+/* Экранная машина виджета (ADR-123): ai | list | ticket | new — один активен. */
+.pai-screen { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 .pai-fab {
     position: fixed;
@@ -232,6 +238,154 @@
 
 .pai-spin { animation: pai-spin 1s linear infinite; }
 @keyframes pai-spin { to { transform: rotate(360deg); } }
+
+/* --- Техподдержка ВНУТРИ панели (ADR-123): список чатов / тикеты / новое ----- */
+.pai-list { gap: 4px; }
+.pai-foot-btn { padding: 10px 12px; border-top: 1px solid var(--border); background: var(--bg-main); }
+.pai-block-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #0b1b33;
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.pai-block-btn:disabled { opacity: 0.5; cursor: default; }
+.pai-ghost-btn {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-main);
+    color: var(--text-primary);
+    font-size: 13.5px;
+    cursor: pointer;
+}
+
+.pai-chat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 10px;
+    cursor: pointer;
+}
+.pai-chat:hover { background: var(--bg-hover); }
+.pai-chat.pinned { background: rgba(168, 199, 250, 0.08); }
+.pai-chat-icon { color: var(--accent); display: flex; }
+.pai-chat-main { flex: 1; min-width: 0; }
+.pai-chat-title { display: flex; align-items: center; gap: 6px; }
+.pai-chat-name {
+    font-size: 13.5px;
+    color: var(--text-primary);
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pai-chat-prev {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pai-chat-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.pai-chat-time { font-size: 11px; color: var(--text-secondary); }
+.pai-chevron { color: var(--text-secondary); font-size: 20px; }
+.pai-badge {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.pai-chat-status {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+}
+.pai-chat-status.closed { opacity: 0.7; }
+
+.pai-list-empty { font-size: 12.5px; color: var(--text-secondary); padding: 12px 4px; line-height: 1.5; }
+.pai-archive { margin-top: 6px; }
+.pai-archive summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 4px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+.pai-archive summary .material-symbols-outlined { font-size: 18px; }
+
+/* Пузыри переписки тикета (переиспользуют .pai-msg-геометрию). */
+.pai-bubble { position: relative; }
+.pai-bubble-text { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
+.pai-op-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--accent);
+    margin-bottom: 3px;
+}
+.pai-op-label .material-symbols-outlined { font-size: 14px; }
+.pai-time { font-size: 10.5px; color: var(--text-secondary); margin-top: 3px; text-align: right; }
+.pai-msg.user .pai-time { color: rgba(11, 27, 51, 0.6); }
+
+.pai-closed-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+    background: var(--bg-main);
+    flex-wrap: wrap;
+}
+
+.pai-new-form { gap: 8px; }
+.pai-lbl { font-size: 12px; color: var(--text-secondary); }
+.pai-inp {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 9px 11px;
+    font-family: inherit;
+    font-size: 13.5px;
+    line-height: 1.4;
+    resize: vertical;
+}
+.pai-inp:focus { outline: none; border-color: var(--accent); }
+.pai-new-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+.pai-bridge {
+    align-self: center;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    padding: 4px 0;
+}
 
 @media (max-width: 480px) {
     .pai-panel, .pai-panel.full {
