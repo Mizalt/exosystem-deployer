@@ -124,6 +124,36 @@
     padding: 1px 5px;
     border-radius: 5px;
 }
+/* Markdown-таблица (GFM pipe) в ответе: компактная; широкая — горизонтальный
+   скролл ВНУТРИ пузыря (виджет узкий), макет не рвётся. */
+.pai-msg.assistant .md-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 4px 0 6px;
+}
+.pai-msg.assistant .md-table {
+    border-collapse: collapse;
+    font-size: 12.5px;
+    line-height: 1.4;
+    white-space: normal;
+}
+.pai-msg.assistant .md-table th,
+.pai-msg.assistant .md-table td {
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: normal;
+    word-break: normal;
+}
+.pai-msg.assistant .md-table th {
+    background: rgba(168, 199, 250, 0.08);
+    font-weight: 600;
+}
+.pai-msg.assistant .md-table tr:nth-child(even) td { background: rgba(255, 255, 255, 0.03); }
+/* Выравнивание — закрытый набор классов из :---: (никаких style-атрибутов). */
+.pai-msg.assistant .md-table .md-al-c { text-align: center; }
+.pai-msg.assistant .md-table .md-al-r { text-align: right; }
 .pai-msg.assistant.pai-typing {
     display: flex;
     align-items: center;
