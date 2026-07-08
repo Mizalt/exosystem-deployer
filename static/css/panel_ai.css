@@ -5,6 +5,15 @@
  * Плавающая кнопка справа снизу; чтобы не лечь на кнопку центра задач панели,
  * помощник смещён левее по горизонтали. */
 
+/* [hidden] у .pai-fab/.pai-panel и .icon-btn в шапке: setMode() прячет чат/кнопку
+   через element.hidden, а кнопка «Очистить» задана hidden в разметке — но display:flex
+   этих элементов перебивает UA-правило [hidden]{display:none}. Без этого правила
+   свёрнутый чат, плавающая кнопка и «Очистить» оставались видимы (тот же баг чинили
+   для .task-center-panel в ядре style.css). Возвращаем скрытие с приоритетом. */
+.pai-fab[hidden],
+.pai-panel[hidden],
+.pai-head .icon-btn[hidden] { display: none !important; }
+
 .pai-fab {
     position: fixed;
     right: 24px;
