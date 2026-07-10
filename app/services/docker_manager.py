@@ -6,6 +6,7 @@ import tempfile
 import hashlib
 import os
 import socket
+import threading
 from pathlib import Path
 
 from app import artifact_utils
@@ -102,6 +103,66 @@ APP_NANO_CPUS = _env_int_limit("DEPLOYER_APP_NANO_CPUS", 1_000_000_000)  # 1.0 C
 APP_PIDS_LIMIT = _env_int_limit("DEPLOYER_APP_PIDS_LIMIT", 256)  # ≤256 PID (анти форк-бомба)
 
 
+# --- Сериализация docker build на ноде (ADR-137) -----------------------------
+# Боевой инцидент: на 1 vCPU-ноде (flavor SL1.1) параллельные `docker build`
+# насыщали единственное ядро — нода и панель теряли отзывчивость на 60-268 сек,
+# а сессии БД, удерживаемые на всё время сборки (build_service), исчерпывали пул
+# («QueuePool limit of size 5 overflow 10 reached, timeout 30»). Митигация:
+# BoundedSemaphore ограничивает число ОДНОВРЕМЕННЫХ сборок (дефолт 1 — строгая
+# очередь). Слот держится ТОЛЬКО вокруг самой сборки (_build_image_streaming):
+# оба пути публикации (sync-редеплой в threadpool и /redeploy-stream в executor)
+# идут через неё, а кэш-хиты и распаковка ZIP слот не занимают.
+
+
+def _env_build_concurrency() -> int:
+    """Лимит одновременных сборок из env DEPLOYER_MAX_CONCURRENT_BUILDS
+    (дефолт 1; санация в 1..8, мусор → дефолт — не роняем сборку из-за env)."""
+    raw = (os.environ.get("DEPLOYER_MAX_CONCURRENT_BUILDS") or "").strip()
+    try:
+        val = int(raw) if raw else 1
+    except ValueError:
+        val = 1
+    return max(1, min(val, 8))
+
+
+def _env_build_queue_timeout() -> float:
+    """Таймаут ожидания слота сборки, сек (env DEPLOYER_BUILD_QUEUE_TIMEOUT,
+    дефолт 1200; мусор/≤0 → дефолт). По истечении сборка ДЕГРАДИРУЕТ (идёт без
+    слота), а не висит вечно — зависшая чужая сборка не блокирует всех навсегда."""
+    raw = (os.environ.get("DEPLOYER_BUILD_QUEUE_TIMEOUT") or "").strip()
+    try:
+        val = float(raw) if raw else 1200.0
+    except ValueError:
+        val = 1200.0
+    return val if val > 0 else 1200.0
+
+
+def _env_build_cpu_shares() -> int:
+    """cpu_shares билд-контейнеров из env DEPLOYER_BUILD_CPU_SHARES.
+
+    Дефолт (env не задан) — 512; явные «0»/пусто → 0 = троттл выключен
+    (container_limits не передаётся вовсе); мусор → дефолт 512."""
+    raw = os.environ.get("DEPLOYER_BUILD_CPU_SHARES")
+    if raw is None:
+        return 512
+    raw = raw.strip()
+    if raw == "":
+        return 0
+    try:
+        val = int(raw)
+    except ValueError:
+        return 512
+    return max(0, val)
+
+
+# Семафор создаётся при импорте (env процесса уже задан). BoundedSemaphore, а не
+# Semaphore: лишний release (баг учёта) громко упадёт ValueError, а не молча
+# расширит лимит. Лимит фиксируем в константе: сообщение об очереди говорит ровно
+# про фактический размер семафора (смена env после старта на него не влияет).
+_BUILD_CONCURRENCY = _env_build_concurrency()
+_build_semaphore = threading.BoundedSemaphore(_BUILD_CONCURRENCY)
+
+
 def compute_image_tag(base_key: str, build_config: dict = None) -> str:
     """Детерминированный тег образа по (контент артефакта + стратегия + конфиг).
 
@@ -188,30 +249,86 @@ def _build_image_streaming(build_context: Path, image_tag: str, on_line=None):
     (раньше игнорировались — долгий pull выглядел зависанием) превращаются в
     троттленные строки-проценты, а завершение пишет замер OperationMetric.
     low-level build НЕ кидает BuildError — ошибку отдаёт как chunk {'error': ...};
-    ловим её и поднимаем RuntimeError с хвостом лога."""
+    ловим её и поднимаем RuntimeError с хвостом лога.
+
+    Сериализация (ADR-137): сборка берёт слот `_build_semaphore` (дефолт — одна
+    сборка на ноду). Если слот не освободился за DEPLOYER_BUILD_QUEUE_TIMEOUT —
+    деградируем: строим БЕЗ слота с предупреждением в лог (никаких вечных
+    блокировок). ВСЁ после захвата — внутри try, release гарантирован во внешнем
+    finally даже при исключении из учёта прогресса (дофикс по ревью ADR-137:
+    раньше begin/finish стояли вне защиты — экзотическое исключение из них могло
+    утечь слотом). После ожидания в очереди кэш перепроверяется: этот же
+    content-addressed тег могла собрать параллельная публикация — тогда пересборка
+    не нужна (бережём CPU слабой ноды, ради которой и введена очередь)."""
     from app.services import build_progress
 
-    log_lines: list[str] = []
-    error_text = None
-    ok = False
-    build_progress.begin(image_tag)
+    acquired = _build_semaphore.acquire(blocking=False)
     try:
-        for chunk in client.api.build(path=str(build_context), tag=image_tag,
-                                      rm=True, forcerm=True, decode=True):
-            if 'error' in chunk:
-                error_text = str(chunk['error']).rstrip()
-                print(f"ERROR: Docker build failed: {error_text}")
-            line = build_progress.feed(image_tag, chunk)
-            if line:
-                if 'error' not in chunk:
-                    print(line)
-                log_lines.append(line)
+        if not acquired:
+            timeout = _env_build_queue_timeout()
+            wait_msg = (f"Сборка {image_tag} ждёт свободный слот "
+                        f"(лимит {_BUILD_CONCURRENCY} одновременно, таймаут {timeout:.0f}с)…")
+            print(f"INFO: {wait_msg}")
+            if on_line is not None:
+                on_line(wait_msg)
+            acquired = _build_semaphore.acquire(timeout=timeout)
+            if not acquired:
+                print(f"WARNING: Слот сборки не освободился за {timeout:.0f}с — "
+                      f"продолжаю БЕЗ слота (деградация, нода может замедлиться): {image_tag}")
+            # Пока стояли в очереди, параллельная публикация могла собрать ЭТОТ ЖЕ
+            # content-addressed тег (кэш build_image_if_needed проверялся ДО
+            # очереди). Перепроверяем: пересборка готового образа лишь зря жгла бы
+            # CPU той самой слабой ноды. Тег детерминирован по контенту+конфигу —
+            # скип безопасен (результат идентичен).
+            image_ready = False
+            try:
+                client.images.get(image_tag)
+                image_ready = True
+            except docker.errors.DockerException:
+                pass  # образа нет (или демон не ответил) — строим как обычно
+            if image_ready:
+                done_msg = (f"Образ {image_tag} уже собран параллельной публикацией "
+                            f"за время ожидания — пересборка не нужна.")
+                print(f"INFO: {done_msg}")
                 if on_line is not None:
-                    on_line(line)
-        ok = error_text is None
+                    on_line(done_msg)
+                return
+
+        log_lines: list[str] = []
+        error_text = None
+        ok = False
+        build_progress.begin(image_tag)
+        try:
+            build_kwargs = dict(path=str(build_context), tag=image_tag,
+                                rm=True, forcerm=True, decode=True)
+            # Best-effort троттл CPU сборки (ADR-137): классический builder уважает
+            # cpushares — под нагрузкой билд-контейнеры уступают ядро деплоеру и
+            # сервисам, на свободной ноде никому не мешают. Радикально проблему
+            # 1-ядерной ноды решает только сборка ВНЕ ноды (будущий трек).
+            cpu_shares = _env_build_cpu_shares()
+            if cpu_shares > 0:
+                build_kwargs["container_limits"] = {"cpushares": cpu_shares}
+            for chunk in client.api.build(**build_kwargs):
+                if 'error' in chunk:
+                    error_text = str(chunk['error']).rstrip()
+                    print(f"ERROR: Docker build failed: {error_text}")
+                line = build_progress.feed(image_tag, chunk)
+                if line:
+                    if 'error' not in chunk:
+                        print(line)
+                    log_lines.append(line)
+                    if on_line is not None:
+                        on_line(line)
+            ok = error_text is None
+        finally:
+            # ok=False и при исключении самого стрима (демон оборвал сборку и т.п.).
+            build_progress.finish(image_tag, ok=ok)
     finally:
-        # ok=False и при исключении самого стрима (демон оборвал сборку и т.п.).
-        build_progress.finish(image_tag, ok=ok)
+        # Возвращаем слот ВСЕГДА (успех/ошибка/исключение/скип после очереди), но
+        # только если брали: деградировавшая сборка чужой слот не отпускает
+        # (BoundedSemaphore иначе упал бы ValueError — и поделом).
+        if acquired:
+            _build_semaphore.release()
     if error_text is not None:
         detail = "\n".join(log_lines[-60:])
         raise RuntimeError(f"Ошибка сборки образа:\n{detail}")
@@ -649,7 +766,9 @@ def get_system_metrics() -> dict:
             "build_cache_mb": None}
     try:
         df = client.df()
-        to_mb = lambda b: round((b or 0) / (1024 * 1024), 1)
+
+        def to_mb(b):
+            return round((b or 0) / (1024 * 1024), 1)
         disk["images_mb"] = to_mb(df.get("LayersSize"))
         disk["containers_mb"] = to_mb(sum(c.get("SizeRw", 0) or 0 for c in (df.get("Containers") or [])))
         disk["volumes_mb"] = to_mb(sum((v.get("UsageData") or {}).get("Size", 0) or 0 for v in (df.get("Volumes") or [])))

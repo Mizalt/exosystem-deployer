@@ -1,5 +1,6 @@
 # --- ИСПРАВЛЕННЫЙ ФАЙЛ: app/database.py ---
 
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
@@ -15,8 +16,31 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./data/deployer.db"
 
+
+def _env_pool_int(name: str, default: int, lo: int, hi: int) -> int:
+    """Целое из env с санацией в [lo..hi]; пусто/мусор → дефолт (не роняем старт)."""
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        val = int(raw) if raw else default
+    except ValueError:
+        return default
+    return max(lo, min(val, hi))
+
+
+# Параметры пула (ADR-137). Дефолтный QueuePool (5+10, timeout 30) исчерпывался в
+# боевом инциденте: сессия БД удерживается на ВСЁ время docker-сборки
+# (build_service), параллельные публикации + фоновые циклы → «QueuePool limit of
+# size 5 overflow 10 reached, timeout 30». Класс пула и check_same_thread=False
+# НЕ меняем: файловый SQLite в SQLAlchemy 2.x использует QueuePool — параметры
+# применяются. pool_pre_ping/pool_recycle — гигиена против протухших коннектов.
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    pool_size=_env_pool_int("DEPLOYER_DB_POOL_SIZE", 10, 1, 64),
+    max_overflow=_env_pool_int("DEPLOYER_DB_MAX_OVERFLOW", 20, 0, 128),
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
