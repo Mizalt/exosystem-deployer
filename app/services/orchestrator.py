@@ -1,6 +1,7 @@
 # --- app/services/orchestrator.py ---
 import asyncio
 import docker
+from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
@@ -84,6 +85,32 @@ def get_available_port(db: Session, group_name: str):
     return None
 
 
+def _container_started_at(container):
+    """Naive-UTC момент фактического старта контейнера из инспекта (или None).
+
+    Docker отдаёт RFC3339 с наносекундами («2026-07-11T10:00:00.123456789Z») —
+    `fromisoformat` такое не ест, поэтому парсим сами, усекая дробную часть до
+    микросекунд. Инспект уже получен `containers.get()` в reconcile — НОВЫХ
+    обращений к демону этот разбор не добавляет (перф-довод ADR-145 сохранён).
+    """
+    raw = ((getattr(container, "attrs", None) or {}).get("State") or {}).get("StartedAt") or ""
+    if not raw or raw.startswith("0001-"):  # «нулевое время» докера — не стартовал
+        return None
+    try:
+        base, _, frac = str(raw).rstrip("Zz").partition(".")
+        dt = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")
+        digits = ""
+        for ch in frac:  # только ведущие цифры дроби (наносекунды/оффсет отбрасываем)
+            if not ch.isdigit():
+                break
+            digits += ch
+        if digits:
+            dt = dt.replace(microsecond=int(digits[:6].ljust(6, "0")))
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 def reconcile(db: Session):
     """
     Основная функция цикла согласования.
@@ -122,6 +149,22 @@ def reconcile(db: Session):
                         instance.status = 'online'
                         instance.restart_count = 0
                         db.commit()
+                    else:
+                        # Дофикс #6 (ревью): после ребута хоста/докер-демона контейнер
+                        # с restart-policy поднимается сам; если к первому reconcile
+                        # порт уже отвечает — статус в БД так и остался 'online',
+                        # UPDATE не выполнялся и deployed_at (источник аптайма,
+                        # ADR-145) молчал о рестарте. Сверяем фактический старт из
+                        # УЖЕ полученного инспекта с меткой БД и сдвигаем её вперёд —
+                        # аптайм честно обнуляется. В штатной работе StartedAt старше
+                        # deployed_at (online ставится ПОСЛЕ старта) — ветка молчит.
+                        started = _container_started_at(container)
+                        db_ts = instance.deployed_at
+                        if db_ts is not None and db_ts.tzinfo is not None:
+                            db_ts = db_ts.astimezone(timezone.utc).replace(tzinfo=None)
+                        if started and db_ts and started > db_ts:
+                            instance.deployed_at = started  # явное значение побеждает onupdate
+                            db.commit()
                 else:
                     # Запущен, но порт ещё не отвечает (стартует или завис на старте).
                     # Слот занят (existing_instances), новую реплику не плодим.

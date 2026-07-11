@@ -92,6 +92,71 @@ def test_running_container_marked_online(db, deployment, patched, fake_docker):
     assert len(patched["deploy"]) == 0  # цель достигнута, ничего не создаём
 
 
+def test_host_reboot_resets_deployed_at_for_uptime(db, deployment, patched, fake_docker):
+    """Дофикс #6 (ревью): ребут хоста — контейнер с restart-policy поднялся сам,
+    статус в БД остался 'online' (UPDATE не выполняется) → deployed_at (источник
+    аптайма, ADR-145) молчал о рестарте. Теперь reconcile сверяет фактический
+    StartedAt из уже полученного инспекта и сдвигает метку вперёд."""
+    from datetime import datetime, timedelta, timezone
+
+    inst = models.Instance(
+        deployment_id=deployment.id,
+        container_name="deployer-dep_qwe_v1.0.0_9001",
+        assigned_port=9001,
+        status="online",
+        restart_count=0,
+    )
+    db.add(inst)
+    db.commit()
+    old_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)
+    inst.deployed_at = old_ts  # явное присваивание побеждает onupdate
+    db.commit()
+
+    container = FakeContainer(inst.container_name, status="running")
+    # Докер отдаёт RFC3339 с наносекундами и 'Z' — парсер обязан это переварить.
+    restarted = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=7)
+    container.attrs = {"State": {"StartedAt": restarted.strftime("%Y-%m-%dT%H:%M:%S") + ".123456789Z"}}
+    fake_docker.containers.add(container)
+
+    orchestrator.reconcile(db)
+    db.refresh(inst)
+
+    assert inst.status == "online"
+    # Аптайм обнулился: метка сдвинута к фактическому старту (не осталась 5-дневной).
+    assert inst.deployed_at > old_ts
+    assert abs((inst.deployed_at - restarted).total_seconds()) < 2
+
+
+def test_stable_online_instance_keeps_deployed_at(db, deployment, patched, fake_docker):
+    """Антирегресс к дофиксу: штатная работа (StartedAt СТАРШЕ deployed_at, online
+    ставится после старта контейнера) — метку не трогаем, аптайм копится. Пустой
+    attrs (FakeContainer по умолчанию, старые тесты) — тоже no-op."""
+    from datetime import datetime, timedelta, timezone
+
+    inst = models.Instance(
+        deployment_id=deployment.id,
+        container_name="deployer-dep_qwe_v1.0.0_9001",
+        assigned_port=9001,
+        status="online",
+        restart_count=0,
+    )
+    db.add(inst)
+    db.commit()
+    marked_online = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=2)
+    inst.deployed_at = marked_online
+    db.commit()
+
+    container = FakeContainer(inst.container_name, status="running")
+    started_before = marked_online - timedelta(seconds=30)
+    container.attrs = {"State": {"StartedAt": started_before.strftime("%Y-%m-%dT%H:%M:%S") + "Z"}}
+    fake_docker.containers.add(container)
+
+    orchestrator.reconcile(db)
+    db.refresh(inst)
+
+    assert inst.deployed_at == marked_online  # аптайм не сброшен
+
+
 def test_health_gate_holds_starting_until_app_responds(db, deployment, patched, fake_docker, monkeypatch):
     """Health-gate: контейнер 'running', но порт не отвечает → НЕ 'online'.
 

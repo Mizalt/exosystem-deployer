@@ -12,6 +12,7 @@ except (AttributeError, ValueError):
     pass
 
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Annotated
 from contextlib import asynccontextmanager
@@ -204,6 +205,26 @@ def get_version_info():
 
 # === СОВМЕСТИМОСТЬ С СЕРВИСАМИ ДЛЯ ФРОНТЕНДА (/api/services) ===
 
+def _instance_uptime(inst) -> tuple[str | None, int | None]:
+    """Аптайм ONLINE-реплики: (started_at ISO, uptime_seconds) или (None, None).
+
+    Источник — `Instance.deployed_at` (onupdate=now): у стабильно работающей
+    реплики последняя запись строки — момент перехода в `online`, поэтому
+    «время с deployed_at» ≈ аптайм контейнера; рестарт (offline→online) честно
+    обнуляет счётчик — маленький аптайм сигналит о недавнем перезапуске (#6,
+    полезно техподдержке). Не-online (starting/failed/offline) → None: у таких
+    реплик deployed_at — момент СБОЯ, а не работы. SQLite хранит naive-UTC
+    (CURRENT_TIMESTAMP) — трактуем отсутствие tzinfo как UTC.
+    """
+    if not inst or inst.status != "online" or not inst.deployed_at:
+        return None, None
+    dt = inst.deployed_at
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+    return dt.isoformat(), max(0, int(seconds))
+
+
 @app.get("/api/services", tags=["Services Compatibility Layer"])
 def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)):
     """Эмулирует список сервисов из списка деплоев."""
@@ -216,7 +237,18 @@ def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)
         first_instance = dep.instances[0] if dep.instances else None
         port = first_instance.assigned_port if first_instance else 0
         status = first_instance.status if first_instance else "offline"
-        online_count = sum(1 for i in dep.instances if i.status == "online")
+        online_insts = [i for i in dep.instances if i.status == "online"]
+        online_count = len(online_insts)
+        # Аптайм контейнера (#6): ЛК зеркалит его в строку приложения. Аддитивно —
+        # старый клиент поля просто не читает, старой ноде ЛК прощает отсутствие.
+        # Дофикс по ревью: у relationship нет order_by — instances[0] формально
+        # «какая-то» реплика, при target_replicas>1 чип прыгал бы между репликами
+        # от полла к поллу. Берём ДЕТЕРМИНИРОВАННО младшую по id online-реплику
+        # (стабильна, пока жива); заодно чип не гаснет, когда instances[0]
+        # случайно не-online при живых соседях. port/status оставлены на
+        # pre-existing паттерне первой реплики — их семантика не менялась.
+        uptime_inst = min(online_insts, key=lambda i: i.id, default=None)
+        started_at, uptime_seconds = _instance_uptime(uptime_inst)
 
         # Живой прогресс сборки (Ночь 14, ADR-082): тег образа content-addressed —
         # формула та же, что у оркестратора, поэтому ищем сборку именно этого
@@ -244,6 +276,9 @@ def get_services_compat(current_user: CurrentUser, db: Session = Depends(get_db)
             "target_replicas": dep.target_replicas,
             "online_count": online_count,
             "instances_count": len(dep.instances),
+            # Аптайм работающей реплики (#6): None у не-online/без данных.
+            "started_at": started_at,
+            "uptime_seconds": uptime_seconds,
             # Расширенный режим сборки/рантайма (Идея 2а) — для UI-редактора конфига.
             "internal_port": run_config.effective_port(dep.internal_port, dep.detected_port),
             "run_command": dep.run_command,
