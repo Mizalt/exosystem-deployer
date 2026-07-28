@@ -96,6 +96,19 @@ def _update_history_isolated(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  Изоляция state-файлов провиженинга (A0-2: удаление аккаунта сносит их по маске)
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _provisioning_state_isolated(tmp_path, monkeypatch):
+    """`servers._STATE_DIR` — жёсткий относительный путь `data/cloud_provisioning`.
+    Уничтожение аккаунта сносит оттуда `.provisioned-a<acc>s*.json` ПО МАСКЕ, а id
+    аккаунтов в тестах те же 1..N, что и в дев-каталоге — без изоляции прогон тестов
+    удалял бы реальные инвентари ресурсов разработчика."""
+    from app.cloud.services import servers as cloud_servers
+    monkeypatch.setattr(cloud_servers, "_STATE_DIR", tmp_path / "cloud_provisioning")
+
+
+# --------------------------------------------------------------------------- #
 #  Фейковый Docker
 # --------------------------------------------------------------------------- #
 class FakeContainer:
@@ -182,6 +195,20 @@ def auth_client(api_env):
 
 
 # --------------------------------------------------------------------------- #
+#  ИИ-студия кода (ADR-109): workspace-ы во временной папке + сброс раннера.
+#  Чтобы тесты НИКОГДА не писали в дев-каталог data/code_projects и не тянули
+#  реальный claude-code/сеть (весь код студии — через get_runner()).
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _code_studio_isolated(tmp_path, monkeypatch):
+    from app.cloud.services import code_runner, code_studio
+    monkeypatch.setattr(code_studio, "WORKSPACES_ROOT", tmp_path / "code_projects")
+    code_runner.set_runner(None)
+    yield
+    code_runner.set_runner(None)
+
+
+# --------------------------------------------------------------------------- #
 #  Cloud (ЛК / контрол-плейн) TestClient — отдельное приложение + своя БД.
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -194,9 +221,19 @@ def cloud_env():
     cloud_login_limiter.clear()
     # ADR-093: процессные кэши сессий/лимитов тоже не должны протекать между тестами.
     from app.cloud import auth as cloud_auth
+    from app.cloud.routers.account import delete_account_limiter, receipt_limiter
     from app.cloud.routers.admin import admin_action_limiter
+    from app.cloud.routers.market import match_limiter
     cloud_auth.clear_last_seen_cache()
     admin_action_limiter.clear()
+    delete_account_limiter.clear()  # удаление аккаунта (A0-2) — тоже процессный синглтон
+    receipt_limiter.clear()         # публичный роут акта уничтожения — лимит по IP
+    match_limiter.clear()  # пер-аккаунтный кап подбора — процессный синглтон, чистим
+    # ADR-108: кэш живого листинга доменов Рег.ру ключуется по account_id —
+    # в свежих in-memory БД id аккаунтов совпадают, без сброса листинг «протёк»
+    # бы между тестами.
+    from app.cloud.services import connections as cloud_connections
+    cloud_connections.reset_regru_domains_cache()
 
     engine = create_engine(
         "sqlite://",

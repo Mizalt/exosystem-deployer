@@ -68,3 +68,18 @@ def test_get_docker_client_is_cached(monkeypatch):
     first = environment.get_docker_client()
     second = environment.get_docker_client()
     assert first is second
+
+
+def test_get_docker_client_does_not_handshake_without_daemon(monkeypatch):
+    """🔴 Регресс: конструкция клиента НЕ ходит в демон (версия API пиновая).
+
+    Без пина docker-py 7.x при version="auto" делает рукопожатие в конструкторе
+    → импорт/старт приложения падает, когда Docker недоступен. Пин версии это
+    снимает: строим против ЗАВЕДОМО МЁРТВОГО сокета — исключения быть не должно."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/exosystem-dead.sock")
+    monkeypatch.setattr(environment, "_docker_client", None)
+    # Не должно бросить (иначе — вернулось «auto»-рукопожатие в конструкторе).
+    client = environment.get_docker_client()
+    assert client is not None
+    # Версия API — именно пиновая, а не согласованная с (мёртвым) демоном.
+    assert client.api._version == environment._DOCKER_API_VERSION

@@ -12,6 +12,7 @@ except (AttributeError, ValueError):
     pass
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Annotated
@@ -80,6 +81,29 @@ async def lifespan(app: FastAPI):
         domain=settings.domain,
         ssl_cert_name=settings.ssl_cert_name
     )
+
+    # Self-heal vhost'ов приложений: конфиг приложения пишется только при его
+    # создании/правке, а шаблон ядра меняется (P0 rate-limit + client_max_body_size,
+    # ADR-099). На нодах, где приложение создано СТАРЫМ деплоером, конфиг так и
+    # оставался без client_max_body_size → nginx резал любую загрузку >1 МБ (413)
+    # даже после обновления деплоера. Перегенерируем из БД (идемпотентно: пишем
+    # только при отличии, reload — общий, ниже).
+    db = SessionLocal()
+    try:
+        known_apps = [(a.name, a.domain, a.ssl_cert_name)
+                      for a in db.query(models.Application).all()]
+    except Exception as e:
+        known_apps = []
+        print(f"ERROR: Не удалось прочитать приложения для пересборки nginx: {e}")
+    finally:
+        db.close()
+    try:
+        resynced = nginx_manager.resync_application_configs(
+            known_apps, override_lookup=pro_gate.rate_limit_override)
+        if resynced:
+            print(f"INFO: Пересобрано nginx-конфигов приложений по текущему шаблону: {resynced}")
+    except Exception as e:
+        print(f"ERROR: Пересборка nginx-конфигов приложений не удалась: {e}")
 
     try:
         nginx_manager.reload_nginx()
@@ -366,6 +390,20 @@ def create_service_compat(service_data: dict, current_user: CurrentUser, db: Ses
     )
     dep = crud.create_deployment(db, dep_data, blueprint_id=artifact.blueprint_id)
 
+    # ИЗОЛЯЦИЯ ТОМА (ADR G3) — FAIL-CLOSED: id деплоя — алиас rowid SQLite и МОЖЕТ
+    # переиспользоваться после удаления сервиса. Новый сервис не должен унаследовать
+    # орфан-том прежнего владельца с тем же id (утечка/порча данных) — purge сносит
+    # любой предсуществующий том с этим именем (вместе с осиротевшими держателями)
+    # ПЕРЕД первым запуском. На redeploy/scale том не трогается. Если том так и НЕ
+    # снят (занят) — НЕ монтируем чужие данные: откатываем создание и 409.
+    if not docker_manager.purge_stale_data_volume(dep.id):
+        db.delete(dep)
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="Том данных прежнего сервиса ещё занят — повторите создание "
+                   "через несколько секунд.")
+
     # Расширенный режим (Идея 2а): опц. база/команда/порт/env. Пусто → питоновский
     # автоген на порту 80 (прежнее поведение). Применяем сразу при создании.
     _apply_run_config(dep, service_data)
@@ -468,6 +506,15 @@ def redeploy_service_compat(service_id: int, data: dict, current_user: CurrentUs
     if not dep:
         raise HTTPException(status_code=404, detail="Service not found")
 
+    # 🔴 B (оборона в глубину, реюз rowid SQLite): id деплоя — переиспользуемый rowid.
+    # Клиент (ЛК) шлёт ОЖИДАЕМОЕ имя сервиса; если оно не совпадает с реальным именем
+    # сервиса по этому id — rowid реюзнут ДРУГИМ сервисом, и redeploy перекатил бы чужого
+    # жильца (утечка URL). Отказываем 409 «service identity mismatch». Нода — источник
+    # истины по id. Поле опциональное: старый клиент его не шлёт → проверка не срабатывает.
+    expected = data.get("expected_name")
+    if expected and (dep.name or dep.blueprint.name) != expected:
+        raise HTTPException(status_code=409, detail="service identity mismatch")
+
     artifact_id = data.get("artifact_id")
     if not artifact_id:
         raise HTTPException(status_code=400, detail="Missing artifact_id")
@@ -476,16 +523,34 @@ def redeploy_service_compat(service_id: int, data: dict, current_user: CurrentUs
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
+    # 🔑 Доставка env на РЕДЕПЛОЕ (T2, доступ владельца в CRM/админку). Раньше env
+    # применялся ТОЛЬКО при создании сервиса (_apply_run_config в create_service_compat),
+    # а redeploy нёс лишь artifact_id — провизионные ключи ЛК (EXO_AUTH_ADMIN_*) на ЖИВОЙ
+    # сервис доехать не могли, и доступ включался только «публикацией как новое» (а она
+    # меняет адрес сайта). Теперь опц. `env_vars` МЕРЖИТСЯ в env деплоя ДО пересборки
+    # (свои ключи, заданные в панели ноды, не теряются — это не replace) и применяется при
+    # старте контейнера (orchestrator). Поле ОПЦИОНАЛЬНОЕ: старый ЛК его не шлёт →
+    # поведение прежнее. Значения НИКОГДА не в лог/ответ — подтверждаем только ФАКТ.
+    env_applied = False
+    if data.get("env_vars"):
+        merged = run_config.env_from_json(dep.env_vars)
+        merged.update(run_config.parse_env_input(data.get("env_vars")))
+        dep.env_vars = run_config.env_to_json(merged)
+        env_applied = True
+
     # Build-first (ADR-022): собираем образ НОВОЙ версии ДО сноса работающих реплик и
     # свапаем только при успехе. Провал → откат смены версии, работающий сервис не тронут
-    # (DoD «неудачные деплои не ломают работающий сервис»).
+    # (DoD «неудачные деплои не ломают работающий сервис»). Откат забирает и merge env
+    # выше — не рапортуем доставку env, которой не случилось.
     try:
         build_service.build_first_swap(db, dep, artifact)
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Сборка новой версии не удалась — сервис не тронут.\n{e}")
     db.commit()
-    return {"message": "Service redeployed"}
+    # `env_applied` — ЯВНОЕ подтверждение доставки env для ЛК (fail-closed: старая нода
+    # ключа не вернёт → ЛК не пометит доступ доставленным и не соврёт владельцу).
+    return {"message": "Service redeployed", "env_applied": env_applied}
 
 
 @app.post("/api/services/{service_id}/redeploy-stream", tags=["Services Compatibility Layer"])
@@ -496,6 +561,12 @@ async def redeploy_stream_start(service_id: int, data: dict, current_user: Curre
     dep = crud.get_deployment(db, service_id)
     if not dep:
         raise HTTPException(status_code=404, detail="Service not found")
+    # 🔴 B (оборона в глубину, реюз rowid SQLite): как и /redeploy — если вызывающий
+    # прислал ожидаемое имя, а сервис по этому id несёт другое, rowid реюзнут чужим
+    # сервисом → 409, не перекатываем чужого жильца. Поле опциональное (панель ноды не шлёт).
+    expected = data.get("expected_name")
+    if expected and (dep.name or dep.blueprint.name) != expected:
+        raise HTTPException(status_code=409, detail="service identity mismatch")
     artifact_id = data.get("artifact_id")
     artifact = crud.get_artifact(db, artifact_id) if artifact_id else None
     if not artifact:
@@ -529,6 +600,8 @@ def delete_service_compat(service_id: int, current_user: CurrentUser, db: Sessio
             detail=f"Нельзя удалить, так как на этот сервис ссылаются приложения: {app_names}."
         )
 
+    dep_id = dep.id  # фиксируем ДО удаления записи (нужен для имени тома)
+
     client = get_docker_client()
     for inst in dep.instances:
         try:
@@ -538,7 +611,19 @@ def delete_service_compat(service_id: int, current_user: CurrentUser, db: Sessio
         except Exception:
             pass
 
+    # ПОРЯДОК (ADR G3): сначала удаляем ЗАПИСЬ деплоя, и лишь ПОТОМ снимаем том. Иначе
+    # между сносом контейнеров и удалением строки фоновый reconcile увидел бы деплой
+    # живым (target>=1, 0 реплик) и сделал SCALE UP — заново поднял бы контейнер,
+    # удерживающий том, и remove_data_volume упал бы (том занят), оставив орфан-том.
+    # После delete_deployment реплику воссоздавать некому — снятие тома безопасно.
     crud.delete_deployment(db, service_id)
+
+    # LIFECYCLE ТОМА (ADR G2/G3): это ИСТИННОЕ удаление сервиса (не redeploy/scale-down)
+    # — снимаем персистентный named-том данных, иначе орфаны копятся на диске ноды (и
+    # создают риск утечки при переиспользовании id, см. purge_stale_data_volume).
+    # При redeploy/scale том НЕ трогается (там этот код не вызывается).
+    docker_manager.remove_data_volume(dep_id)
+
     return Response(status_code=204)
 
 
@@ -614,6 +699,49 @@ def _diagnose_service(p: dict) -> str | None:
     if p.get("logs_readable") is False:
         return None  # объяснение уже в самом теле логов (LOG_DRIVER_HELP)
     return None
+
+
+# HTTP-зонд (G1-v2, ADR-181): путь — только абсолютный, из безопасных символов, без
+# query/фрагментов/схем (зонд — не универсальный HTTP-клиент ноды). Короткий таймаут:
+# зонд зовётся после health-gate (порт уже отвечает), долгие ожидания не нужны.
+_PROBE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~/\-]*$")
+_PROBE_TIMEOUT = 5.0
+
+
+@app.get("/api/services/{service_id}/probe", tags=["Services Compatibility Layer"])
+def probe_service_compat(service_id: int, current_user: CurrentUser,
+                         path: str = "/", db: Session = Depends(get_db)):
+    """HTTP-зонд сервиса ИЗНУТРИ deployer-net (G1-v2, ADR-181; capability
+    `service_probe`). Health-gate оркестратора — только TCP-connect
+    (`is_app_responding`): сервис, отвечающий 500 на каждый запрос, числится
+    «online». ЛК зовёт зонд в staging-проверке перед публикацией: нода делает
+    GET к online-реплике по имени контейнера и отдаёт наружу ТОЛЬКО код ответа —
+    тело и заголовки ответа приложения НЕ возвращаются и НЕ логируются (в них
+    могут быть данные/секреты приложения). 3xx не следуем (редирект = живой
+    HTTP-стек, решает вызывающий)."""
+    dep = crud.get_deployment(db, service_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Service not found")
+    if not _PROBE_PATH_RE.match(path or ""):
+        raise HTTPException(status_code=400, detail="Недопустимый путь зонда.")
+    port = run_config.effective_port(dep.internal_port, dep.detected_port)
+    if port == 0:
+        # Воркер без сетевого порта (бот/очередь) — HTTP-зонд неприменим.
+        return JSONResponse(content={"supported": False, "reason": "portless"})
+    online = [i for i in dep.instances if i.status == "online" and i.container_name]
+    if not online:
+        return JSONResponse(content={"supported": False,
+                                     "reason": "no_online_instance"})
+    inst = min(online, key=lambda i: i.id)  # детерминированно младшая online-реплика
+    try:
+        r = httpx.get(f"http://{inst.container_name}:{port}{path}",
+                      timeout=_PROBE_TIMEOUT, follow_redirects=False)
+        return JSONResponse(content={"supported": True, "reachable": True,
+                                     "status_code": r.status_code})
+    except httpx.HTTPError:
+        # Порт был открыт на health-gate, а HTTP-запрос не прошёл (refused/timeout).
+        return JSONResponse(content={"supported": True, "reachable": False,
+                                     "error": "connect"})
 
 
 @app.get("/api/services/{service_id}/stats", tags=["Services Compatibility Layer"])

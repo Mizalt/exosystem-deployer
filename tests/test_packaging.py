@@ -6,15 +6,20 @@
 Исключение (ADR-090): веб-терминал `app/services/terminal.py` намеренно выполняет
 произвольную АДМИНСКУЮ shell-команду через `subprocess` — это не обход docker-py
 (Docker'ом он не управляет), а осознанная фича «терминал для знатоков» под своими
-гейтами (выключатель/таймаут/лимит/аудит/rate-limit). Запрет на `docker exec` через
-CLI при этом остаётся для ВСЕХ файлов.
+гейтами (выключатель/таймаут/лимит/аудит/rate-limit).
+
+Исключение (ADR-109): раннер ИИ-студии кода `app/cloud/services/code_runner.py`
+запускает агента claude-code СУБПРОЦЕССОМ (движок студии) — тоже не управление
+Docker, а исполнение под слоями песочницы (env-минимум/setuid/killpg-таймаут/
+allowedTools только файловые). Запрет на `docker exec` через CLI при этом остаётся
+для ВСЕХ файлов.
 """
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # Файлы, которым subprocess разрешён осознанно (по имени модуля).
-_SUBPROCESS_ALLOWED = {"terminal.py"}
+_SUBPROCESS_ALLOWED = {"terminal.py", "code_runner.py"}
 
 
 def test_dockerfile_has_no_docker_cli():

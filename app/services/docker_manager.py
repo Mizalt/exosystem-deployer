@@ -73,8 +73,56 @@ APP_LOG_CONFIG = docker.types.LogConfig(
 # 🔴 ВСЕ ТРИ лимита env-переопределяемы (opt-out/тюнинг по тарифу без правки кода):
 #   DEPLOYER_APP_MEM_LIMIT (напр. "2g"; пусто/"0"/"none" → БЕЗ лимита памяти),
 #   DEPLOYER_APP_NANO_CPUS (целое nano_cpus; "0" → без CPU-лимита),
-#   DEPLOYER_APP_PIDS_LIMIT (целое; "0"/отрицательное → без pids-лимита).
+#   DEPLOYER_APP_PIDS_LIMIT (целое; "0"/отрицательное → без pids-лимита),
+#   DEPLOYER_APP_MEMSWAP (напр. "2g"; пусто/"0"/"none" → без своп-лимита),
+#   DEPLOYER_APP_OOM_SCORE_ADJ (целое -1000..1000; пусто/"none"/"off" → не выставлять).
 # Оператор ноды с тяжёлым приложением может поднять/снять лимит, не патча ядро.
+#
+# 🔴 Своп + OOM-приоритет (анти-«один app душит ВСЮ ноду»): без memswap_limit docker
+# по умолчанию даёт контейнеру ещё столько же свопа — приложение с утечкой не
+# убивается на лимите RAM, а уходит в СВОП-ТРЭШ (насыщает диск-I/O → замирает вся
+# нода). Дефолт memswap == mem_limit → total(mem+swap)=mem → жёсткий OOM-kill вместо
+# трэша. А oom_score_adj=+500 делает app ПРЕДПОЧТИТЕЛЬНОЙ жертвой OOM-killer: под
+# нехваткой памяти ядро убьёт app, а НЕ панель деплоера/nginx на той же ноде.
+
+
+def _node_mem_total_bytes() -> int | None:
+    """Всего RAM ноды в байтах (client.info()['MemTotal']). Best-effort: если демон
+    недоступен/не ответил — None (вызывающий берёт консервативный фикс-дефолт)."""
+    try:
+        return client.info().get("MemTotal") or None
+    except Exception:  # noqa: BLE001 — сайзинг не критичен, не роняем импорт/сборку
+        return None
+
+
+def _parse_size_to_bytes(raw: str) -> int | None:
+    """'1g'/'512m'/'1500k'/число-байт → байты (int). Мусор/≤0 → None. Суффиксы
+    b/k/m/g регистронезависимо (как у docker)."""
+    s = (raw or "").strip().lower()
+    if not s:
+        return None
+    units = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+    mult = 1
+    if s[-1] in units:
+        mult = units[s[-1]]
+        s = s[:-1]
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    return int(val * mult) if val > 0 else None
+
+
+def _default_app_mem_limit() -> str:
+    """Дефолт mem_limit app С УЧЁТОМ размера ноды (анти-«один app занял всю RAM»):
+    на ноде ≥2 ГБ — прежний "1g" (обратная совместимость для «годами работавших»
+    тяжёлых app), на маленькой (1-2 ГБ) — ~50% RAM в байтах, чтобы один сервис не
+    выжрал всю память ноды. Best-effort: размер ноды не прочитать → "1g"."""
+    total = _node_mem_total_bytes()
+    one_g = 1024 ** 3
+    if not total or total >= 2 * one_g:
+        return "1g"
+    return str(int(total * 0.5))  # байты (int-строка) — docker-py принимает
 
 
 def _env_mem_limit(default: str) -> str | None:
@@ -85,6 +133,38 @@ def _env_mem_limit(default: str) -> str | None:
     if raw == "" or raw.lower() in ("0", "none", "off"):
         return None  # docker-py: mem_limit=None → без лимита памяти
     return raw
+
+
+def _env_memswap_limit(default):
+    """memswap_limit app: по умолчанию == mem_limit (total mem+swap == mem → без
+    своп-трэша, жёсткий OOM-kill вместо деградации всей ноды в своп). env
+    DEPLOYER_APP_MEMSWAP: значение / пусто-«0»-«none»-«off» → None (без своп-лимита).
+    Если mem_limit снят (default=None) — memswap тоже None (docker требует mem для swap)."""
+    raw = os.environ.get("DEPLOYER_APP_MEMSWAP")
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "" or raw.lower() in ("0", "none", "off"):
+        return None
+    return raw
+
+
+def _env_oom_score_adj(default: int) -> int | None:
+    """oom_score_adj app-контейнера: app — ПРЕДПОЧТИТЕЛЬНАЯ жертва OOM-killer (ядро
+    убивает app, а не панель/nginx). Дефолт +500 (диапазон docker -1000..1000). env
+    DEPLOYER_APP_OOM_SCORE_ADJ: целое (в т.ч. 0/отрицательное — валидны); пусто/«none»/
+    «off» → None (не выставлять, обратная совместимость); мусор → дефолт."""
+    raw = os.environ.get("DEPLOYER_APP_OOM_SCORE_ADJ")
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "" or raw.lower() in ("none", "off"):
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        return default
+    return max(-1000, min(1000, val))
 
 
 def _env_int_limit(name: str, default: int) -> int | None:
@@ -98,7 +178,9 @@ def _env_int_limit(name: str, default: int) -> int | None:
     return val if val > 0 else None  # ≤0 → снять лимит
 
 
-APP_MEM_LIMIT = _env_mem_limit("1g")   # ≤1 ГБ RAM/контейнер (OOM-kill вместо смерти ноды)
+APP_MEM_LIMIT = _env_mem_limit(_default_app_mem_limit())  # ≤1 ГБ (или ~50% RAM малой ноды)
+APP_MEMSWAP_LIMIT = _env_memswap_limit(APP_MEM_LIMIT)  # == mem_limit → без своп-трэша
+APP_OOM_SCORE_ADJ = _env_oom_score_adj(500)  # app — предпочтительная жертва OOM (не панель)
 APP_NANO_CPUS = _env_int_limit("DEPLOYER_APP_NANO_CPUS", 1_000_000_000)  # 1.0 CPU
 APP_PIDS_LIMIT = _env_int_limit("DEPLOYER_APP_PIDS_LIMIT", 256)  # ≤256 PID (анти форк-бомба)
 
@@ -153,6 +235,34 @@ def _env_build_cpu_shares() -> int:
     except ValueError:
         return 512
     return max(0, val)
+
+
+def _default_build_mem_bytes() -> int:
+    """Консервативный дефолт памяти сборки: 1.5 ГБ (сборка тяжелее запуска —
+    pip-компиляция колёс/npm ci), но не больше ~75% RAM ноды: на 1-2 ГБ ноде 1.5 ГБ ≈
+    вся память, режем, чтобы build не задушил хост. Best-effort сайзинг → фикс 1.5 ГБ."""
+    base = 1536 * 1024 * 1024  # 1.5 ГБ в байтах
+    total = _node_mem_total_bytes()
+    if total:
+        return min(base, int(total * 0.75))
+    return base
+
+
+def _env_build_mem_limit_bytes() -> int | None:
+    """Лимит памяти build-контейнера в БАЙТАХ (container_limits docker-py — в байтах).
+
+    🔴 ГЛАВНОЕ (анти-«один build душит ноду»): без него тяжёлый `RUN pip install`/
+    `npm ci` рос по RAM без потолка → OOM-давление на хост → панель/nginx/соседние app
+    на той же ноде замирали на десятки секунд. env DEPLOYER_BUILD_MEM_LIMIT
+    ('1500m'/'1g'/число-байт); пусто/«0»/«none»/«off» → None = без лимита (осознанный
+    opt-out для тяжёлых образов); мусор → консервативный дефолт."""
+    raw = os.environ.get("DEPLOYER_BUILD_MEM_LIMIT")
+    if raw is None:
+        return _default_build_mem_bytes()
+    raw = raw.strip()
+    if raw == "" or raw.lower() in ("0", "none", "off"):
+        return None
+    return _parse_size_to_bytes(raw) or _default_build_mem_bytes()
 
 
 # Семафор создаётся при импорте (env процесса уже задан). BoundedSemaphore, а не
@@ -301,13 +411,25 @@ def _build_image_streaming(build_context: Path, image_tag: str, on_line=None):
         try:
             build_kwargs = dict(path=str(build_context), tag=image_tag,
                                 rm=True, forcerm=True, decode=True)
-            # Best-effort троттл CPU сборки (ADR-137): классический builder уважает
-            # cpushares — под нагрузкой билд-контейнеры уступают ядро деплоеру и
-            # сервисам, на свободной ноде никому не мешают. Радикально проблему
-            # 1-ядерной ноды решает только сборка ВНЕ ноды (будущий трек).
+            # Лимиты ресурсов сборки (ADR-137 + анти-«один build душит ВСЮ ноду»):
+            # классический builder уважает container_limits (значения — в БАЙТАХ).
+            #  • cpushares — мягкий троттл CPU: под нагрузкой билд уступает ядро
+            #    деплоеру/сервисам, на свободной ноде никому не мешает;
+            #  • memory/memswap — 🔴 ЖЁСТКИЙ потолок RAM сборки (без него тяжёлый
+            #    pip/npm-build выжирал всю память ноды → OOM-давление на панель/nginx).
+            #    memswap==memory → build не уходит в своп-трэш (OOM-kill ВНУТРИ сборки,
+            #    хост цел). Радикально проблему 1-ядерной ноды решает только сборка ВНЕ
+            #    ноды (будущий трек).
+            limits: dict = {}
             cpu_shares = _env_build_cpu_shares()
             if cpu_shares > 0:
-                build_kwargs["container_limits"] = {"cpushares": cpu_shares}
+                limits["cpushares"] = cpu_shares
+            build_mem = _env_build_mem_limit_bytes()
+            if build_mem:
+                limits["memory"] = build_mem
+                limits["memswap"] = build_mem
+            if limits:
+                build_kwargs["container_limits"] = limits
             for chunk in client.api.build(**build_kwargs):
                 if 'error' in chunk:
                     error_text = str(chunk['error']).rstrip()
@@ -381,12 +503,91 @@ def container_exposed_port(container_id: str) -> int | None:
         return None
 
 
+def data_volume_name(deployment_id) -> str:
+    """Детерминированное имя named-тома данных сервиса по СТАБИЛЬНОМУ server-side id
+    (`models.Deployment.id`).
+
+    🔴 Инвариант изоляции данных: имя выведено ТОЛЬКО из серверного первичного ключа
+    деплоя, НЕ из пользовательского ввода → уникально per-service, детерминировано,
+    без коллизий. Один сервис физически не может смонтировать том другого.
+
+    Свойства (почему привязка к deployment.id, а НЕ к имени контейнера реплики):
+    - стабильно между редеплоями (id деплоя не меняется при смене версии/конфига) →
+      именованный том переживает drop+recreate контейнера;
+    - общее для ВСЕХ реплик сервиса (имя контейнера реплики включает порт/версию —
+      не годится как ключ per-service тома).
+    """
+    return f"deployer-data-{deployment_id}"
+
+
+def remove_data_volume(deployment_id) -> bool:
+    """Удаляет named-том данных сервиса при ИСТИННОМ удалении сервиса (не redeploy/
+    scale-down!). При редеплое/масштабировании том трогать НЕЛЬЗЯ — на нём живут
+    данные пользователя (SQLite компонентов). Best-effort, идемпотентно: если тома
+    нет — считаем успехом; том, занятый живым контейнером, Docker удалить не даст
+    (сначала должны быть сняты контейнеры реплик)."""
+    name = data_volume_name(deployment_id)
+    try:
+        volume = client.volumes.get(name)
+        volume.remove(force=True)
+        print(f"INFO: Removed data volume {name}.")
+        return True
+    except docker.errors.NotFound:
+        return True  # тома и так нет — нечего чистить
+    except Exception as e:  # noqa: BLE001 — уборка тома не должна ронять удаление сервиса
+        print(f"ERROR: Failed to remove data volume {name}: {e}")
+        return False
+
+
+def purge_stale_data_volume(deployment_id) -> bool:
+    """Сносит ПРЕДСУЩЕСТВУЮЩИЙ named-том данных ПЕРЕД выдачей его НОВОМУ сервису.
+
+    🔴 Изоляция данных (ADR G3): `models.Deployment.id` в SQLite — это алиас rowid БЕЗ
+    AUTOINCREMENT, поэтому после удаления сервиса тот же id может достаться новому
+    (SQLite переиспользует максимальный rowid). Если от прежнего сервиса остался
+    ОРФАН-том (`remove_data_volume` best-effort и мог транзиентно упасть: том был
+    занят / демон моргнул), новый сервис с ПЕРЕИСПОЛЬЗОВАННЫМ id смонтировал бы чужой
+    /app/data и прочитал/испортил данные предыдущего владельца — прямое нарушение
+    инварианта изоляции «два разных сервиса никогда не делят том».
+
+    Вызывается ТОЛЬКО при СОЗДАНИИ сервиса (`create` эндпоинт) — гарантирует свежий
+    том даже при переиспользованном id. НЕ вызывать на redeploy/scale: там том обязан
+    ПЕРЕЖИВАТЬ пересоздание (иначе вернём исходный баг потери данных).
+
+    FAIL-CLOSED: сперва снимаем ЛЮБОЙ осиротевший контейнер, всё ещё держащий этот
+    том (иначе Docker не даст удалить том), затем удаляем том. Возвращает True, только
+    если по завершении тома НЕТ (снос удался); False = том занят/не снят → вызывающий
+    ОБЯЗАН отказать в создании, а не смонтировать чужие данные."""
+    name = data_volume_name(deployment_id)
+    try:
+        holders = client.containers.list(all=True, filters={"volume": name})
+    except Exception as e:  # noqa: BLE001 — перечисление держателей не должно ронять
+        print(f"WARN: не удалось перечислить держателей тома {name}: {e}")
+        holders = []
+    for c in holders:
+        try:
+            c.remove(force=True)  # force сам останавливает работающий контейнер
+            print(f"INFO: снят осиротевший контейнер {c.name}, державший том {name}.")
+        except docker.errors.NotFound:
+            pass
+        except Exception as e:  # noqa: BLE001 — один держатель не снялся → remove ниже вернёт False
+            print(f"ERROR: не удалось снять контейнер {getattr(c, 'name', '?')} с томом {name}: {e}")
+    return remove_data_volume(deployment_id)
+
+
 def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_key: str = None,
-                   build_config: dict = None, env_vars: dict = None):
+                   build_config: dict = None, env_vars: dict = None, data_volume: str = None):
     """
     Основная функция деплоя: строит образ (с кэшем) и запускает контейнер.
     `build_config` — параметры расширенного режима сборки (база/команда/порт);
     `env_vars` — env-переменные рантайма, инжектятся в контейнер (Идея 2а, ADR-021).
+    `data_volume` — имя named-тома, монтируемого в /app/data (персистентность данных
+    пользователя между редеплоями, ADR G2). Если задано — том монтируется и в env
+    инжектится EXO_DATA_DIR=/app/data. Docker авто-создаёт named volume при первом
+    run; при recreate именованный том переживает `remove(v=True)` (v=True сносит лишь
+    АНОНИМНЫЕ тома) → данные не стираются на обновлении. Имя параметра НЕ совпадает с
+    модульной функцией `data_volume_name(...)` намеренно (иначе локальный параметр
+    затенял бы функцию — foot-gun при будущих правках).
     Возвращает (container_id, container_name) или (None, None) в случае ошибки.
     """
     container_name = f"deployer-{deployment_name}"
@@ -408,6 +609,18 @@ def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_
     # на внутренний порт 80 внутри сети deployer-net. Это убирает исчерпание
     # host-портов и делает модель кроссплатформенной (Linux/Windows).
     ensure_network()
+
+    # Персистентность данных (ADR G2): при наличии data_volume_name монтируем
+    # named-том в /app/data и гарантируем EXO_DATA_DIR=/app/data, чтобы данные
+    # компонентов (SQLite) писались в том и ПЕРЕЖИВАЛИ редеплой (drop+recreate).
+    # Пользовательские env не затираем — только доливаем EXO_DATA_DIR (инвариант
+    # инфраструктуры: данные обязаны попадать в смонтированный том).
+    runtime_env = dict(env_vars or {})
+    run_volumes = None
+    if data_volume:
+        run_volumes = {data_volume: {"bind": "/app/data", "mode": "rw"}}
+        runtime_env["EXO_DATA_DIR"] = "/app/data"
+
     print(f"INFO: Running new container {container_name} in network {DEPLOYER_NETWORK} (logical port {port})...")
     try:
         container = client.containers.run(
@@ -416,12 +629,19 @@ def deploy_service(zip_path: Path, deployment_name: str, port: int, image_cache_
             network=DEPLOYER_NETWORK,
             detach=True,
             restart_policy={"Name": "unless-stopped"},
-            environment=env_vars or None,  # env-переменные рантайма (Идея 2а)
+            environment=runtime_env or None,  # env-переменные рантайма (Идея 2а) + EXO_DATA_DIR
+            volumes=run_volumes,  # named-том данных (персистентность, ADR G2); None → как раньше
             # Ресурс-лимиты (ADR «ресурс-лимиты app-контейнеров»): щедрые дефолты для
             # ВСЕХ app-контейнеров, чтобы форк-бомба/утечка памяти пользовательского
             # backend-кода (сервисы студии, ADR-110) не положила ноду. nginx/бот/webapp
             # умещаются с запасом — регрессии нет.
             mem_limit=APP_MEM_LIMIT,
+            # 🔴 memswap == mem_limit → total(mem+swap)=mem: приложение с утечкой
+            # получает жёсткий OOM-kill вместо своп-трэша, который морозил всю ноду.
+            memswap_limit=APP_MEMSWAP_LIMIT,
+            # 🔴 app — ПРЕДПОЧТИТЕЛЬНАЯ жертва OOM-killer (+500): при нехватке памяти
+            # ядро убьёт app, а не панель деплоера/nginx на той же ноде.
+            oom_score_adj=APP_OOM_SCORE_ADJ,
             nano_cpus=APP_NANO_CPUS,
             pids_limit=APP_PIDS_LIMIT,
             # Явный json-file c ротацией на КАЖДОМ app-контейнере (ADR-076):

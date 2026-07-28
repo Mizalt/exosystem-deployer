@@ -23,6 +23,7 @@ import os
 import platform
 
 import docker
+from docker.constants import DEFAULT_DOCKER_API_VERSION
 
 # --------------------------------------------------------------------------- #
 #  Docker-сокет
@@ -53,20 +54,31 @@ def docker_socket_url(system: str | None = None) -> str:
 _docker_client = None
 
 
+# Пин версии API docker. БЕЗ него docker-py 7.x при version="auto" делает
+# рукопожатие с демоном ПРЯМО В КОНСТРУКТОРЕ (_retrieve_server_version) — тогда
+# импорт модулей, зовущих get_docker_client(), падает, если демон недоступен
+# (Docker упал / тесты без Docker), нарушая контракт «импорт безопасен без демона».
+# Дефолт = собственный дефолт docker-py (то же, что "auto" резолвит на живой ноде,
+# → поведение не меняется), переопределяемый DOCKER_API_VERSION.
+_DOCKER_API_VERSION = os.environ.get("DOCKER_API_VERSION") or DEFAULT_DOCKER_API_VERSION
+
+
 def get_docker_client() -> docker.DockerClient:
     """Единый кэшированный docker-клиент для всего приложения.
 
-    Создание клиента НЕ открывает соединение (docker-py подключается лениво при
-    первом API-вызове), поэтому импорт модулей, зовущих эту функцию, безопасен и
-    без запущенного демона (важно для тестов).
+    Создание клиента НЕ открывает соединение (версия API пиновая → docker-py НЕ
+    делает рукопожатие в конструкторе; подключается лениво при первом API-вызове),
+    поэтому импорт модулей, зовущих эту функцию, безопасен и без запущенного
+    демона (важно для тестов и для устойчивости к падению Docker).
     """
     global _docker_client
     if _docker_client is None:
         if os.environ.get("DOCKER_HOST"):
             # Доверяем полной конфигурации из окружения (DOCKER_HOST, TLS и т.п.).
-            _docker_client = docker.from_env()
+            _docker_client = docker.from_env(version=_DOCKER_API_VERSION)
         else:
-            _docker_client = docker.DockerClient(base_url=docker_socket_url())
+            _docker_client = docker.DockerClient(
+                base_url=docker_socket_url(), version=_DOCKER_API_VERSION)
     return _docker_client
 
 

@@ -53,6 +53,12 @@ class Artifact(Base):
 class Deployment(Base):
     """Желаемое состояние: Приложение + Версия (Артефакт) + Количество реплик."""
     __tablename__ = "deployments"
+    # id НЕ переиспользуется в СВЕЖИХ БД: реюз rowid отдавал бы новому сервису
+    # data-том прежнего (deployer-data-{id}) → чужие данные/сайт (см. purge в
+    # main.create_service_compat). Существующие таблицы требуют миграции
+    # пересозданием (SQLite ALTER не умеет AUTOINCREMENT) — вынесено; на
+    # существующие таблицы create_all это no-op.
+    __table_args__ = {"sqlite_autoincrement": True}
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=True)  # человекочитаемое имя сервиса (опц., автоген из blueprint)
     blueprint_id = Column(Integer, ForeignKey("app_blueprints.id"), nullable=False)

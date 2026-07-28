@@ -107,6 +107,22 @@ def start_pro_background_tasks() -> list:
         return []
 
 
+def rate_limit_override(app_name: str) -> dict | None:
+    """Per-app override лимитов nginx из PRO-слоя (None в OSS-срезе / при любой ошибке).
+
+    Ядро зовёт это при перегенерации vhost'ов на старте: без него пересборка конфига
+    затирала бы правки владельца из PRO-UI дефолтами P0. Лицензию тут НЕ проверяем —
+    см. `app.pro.registry.rate_limit_override` (ADR-100: приложения не «раздеваются»).
+    """
+    pro = load_pro()
+    if pro is None:
+        return None
+    try:
+        return pro.rate_limit_override(app_name)
+    except Exception:  # noqa: BLE001 — fail-open к P0-дефолтам, старт ноды важнее
+        return None
+
+
 def pro_feature_available(name: str) -> bool:
     """Доступна ли PRO-фича прямо сейчас (для гейтинга UI/эндпоинта `/api/edition`).
 

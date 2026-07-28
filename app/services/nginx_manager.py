@@ -242,6 +242,9 @@ def update_application_nginx_config(
     body_size}` поверх P0-дефолтов. None → дефолтный «предохранитель» P0 (обычный путь
     ядра/OSS). Значения приезжают из `data/pro/rate_limits.json` через PRO-роутер под
     валидной лицензией — само ядро дефолты не меняет.
+
+    Возвращает True, если файл реально изменился (значит нужен reload) — это позволяет
+    звать генерацию идемпотентно на старте (`resync_application_configs`).
     """
     config_path = config.NGINX_SITES_DIR / f"{app_name}.conf"
 
@@ -301,8 +304,43 @@ server {{
     if https_block:
         final_config += f"\n\n{https_block.strip()}"
 
+    current = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    if current == final_config:
+        return False  # идемпотентно: конфиг уже актуален, reload не нужен
     config_path.write_text(final_config, encoding="utf-8")
     print(f"INFO: Nginx config for '{app_name}' generated.")
+    return True
+
+
+def resync_application_configs(apps, override_lookup=None) -> int:
+    """Перегенерирует vhost'ы приложений по ТЕКУЩЕМУ шаблону. Возвращает число изменённых.
+
+    Зачем: конфиг приложения пишется только при его создании/правке, а шаблон ядра со
+    временем меняется. На ноде, обновившей деплоер, у ранее созданных приложений
+    оставался конфиг СТАРОГО образца — без `client_max_body_size` (nginx берёт дефолт
+    1 МБ и режет загрузки «413») и без санитарных лимитов P0 (ADR-099). Вызывается на
+    старте деплоера, поэтому пишем только при реальном отличии — иначе каждый рестарт
+    дёргал бы reload nginx впустую.
+
+    `apps` — итерируемое из троек `(app_name, domain, ssl_cert_name)` (ядро не тащит
+    сюда БД). `override_lookup(app_name) -> dict | None` — per-app лимиты PRO: без него
+    перегенерация СТИРАЛА бы правки владельца из UI (ADR-100: «приложения не
+    раздеваются»), поэтому override применяется независимо от валидности лицензии.
+    Ошибка на одном приложении не срывает остальные — нода не должна не стартовать
+    из-за одного битого vhost.
+    """
+    changed = 0
+    for app_name, domain, ssl_cert_name in apps:
+        if not app_name or not domain:
+            continue  # приложение без домена своего vhost не имеет
+        try:
+            override = override_lookup(app_name) if override_lookup else None
+            if update_application_nginx_config(
+                    app_name, domain, ssl_cert_name=ssl_cert_name, rate_limit=override):
+                changed += 1
+        except Exception as e:  # noqa: BLE001 — один битый конфиг не валит старт ноды
+            print(f"WARN: не удалось пересобрать nginx-конфиг '{app_name}': {e!r}")
+    return changed
 
 
 def update_panel_nginx_config(domain: str = None, ssl_cert_name: str = None):

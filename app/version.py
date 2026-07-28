@@ -16,7 +16,7 @@ from app import editions
 
 # Semver сборки деплоера. Бампать при значимых изменениях API/поведения. На проде
 # может переопределяться env `DEPLOYER_VERSION` (напр. проставляется при сборке образа).
-VERSION = "0.19.11"
+VERSION = "0.19.12"
 
 # Минимальная версия, на которую БЕЗОПАСЕН откат из UI (страж даунгрейда, Ночь 16,
 # ADR-085). Миграции ноды forward-only: ниже 0.11.0 нет самого механизма
@@ -50,6 +50,7 @@ CAPABILITIES = (
     "rate_limit",       # санитарный rate-limit nginx в ядре: зоны+limit_req/conn (P0, ADR-099)
     "pro_license",      # приём/рефреш/отзыв PRO-лицензии: POST /api/pro/license[/revoke] (P1, ADR-100)
     "panel_ai",         # ИИ-помощник панели: GET /api/panel/ai-availability + embedded-виджет (ADR-103)
+    "service_probe",    # HTTP-зонд сервиса изнутри deployer-net: GET /api/services/{id}/probe (G1-v2, ADR-181)
 )
 
 

@@ -207,7 +207,16 @@ def reconcile(db: Session):
 
         actual_replicas = len(alive_instances)
         managed_replicas = len(existing_instances)  # сколько слотов реально занято
-        target_replicas = deployment.target_replicas
+
+        # SINGLE-REPLICA GUARD (ADR G2): каждый сервис получает персистентный named-том
+        # данных (/app/data, SQLite компонентов). N реплик на одном SQLite-томе → порча
+        # данных (конкурентная запись). Поэтому stateful-сервис ЖЁСТКО пинуется к ≤1
+        # реплике: min(target,1) сохраняет scale-to-0 (остановку) и кап на 1 (0→0, 1→1,
+        # N→1). Уже существующие деплои с target>1 безопасно сойдутся вниз к 1.
+        target_replicas = min(deployment.target_replicas, 1)
+        if deployment.target_replicas > 1:
+            print(f"[ORCHESTRATOR] Deployment {deployment.blueprint.name}: stateful (data volume) — "
+                  f"target_replicas={deployment.target_replicas} пинуется к 1 (single-replica guard).")
 
         # SCALE UP — только если занятых слотов меньше цели.
         # (failed/restarting контейнеры занимают слот, поэтому каскада больше нет.)
@@ -252,6 +261,9 @@ def reconcile(db: Session):
                         image_cache_key=deployment.artifact.zip_hash,
                         build_config=build_config,
                         env_vars=env_vars,
+                        # Персистентный том данных, привязанный к СТАБИЛЬНОМУ id деплоя
+                        # (переживает редеплой, общий для реплик, изолирован per-service).
+                        data_volume=docker_manager.data_volume_name(deployment.id),
                     )
                 except Exception as e:
                     # Сохраняем причину (обычно лог сборки) на Deployment — UI покажет,

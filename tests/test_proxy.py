@@ -164,6 +164,95 @@ def test_proxy_success_streams_response(proxy_env, monkeypatch):
     assert "transfer-encoding" not in {k.lower() for k in r.headers}  # hop-by-hop снят
 
 
+def test_proxy_preserves_multiple_set_cookie_headers(proxy_env, monkeypatch):
+    """🔴 Тикет по живому приложению: апстрим ставит НЕСКОЛЬКО кук за один ответ
+    (Auth.js — callback-url + session-token). Склейка их в один Set-Cookie через
+    запятую запрещена (RFC 6265 §3) и часть клиентов теряла вторую, сессионную
+    куку — вход в приложение молча не происходил. Заголовки идут РАЗДЕЛЬНО."""
+    Session, client = proxy_env
+    _seed_app(Session, online=True)
+
+    from app.routers import proxy
+
+    cookie_a = "__Secure-authjs.callback-url=https%3A%2F%2Fshop.example.com; Path=/; SameSite=Lax"
+    cookie_b = ("__Secure-authjs.session-token=abc.def; Path=/; HttpOnly; Secure; "
+                "Expires=Thu, 21 Aug 2026 10:00:00 GMT")
+
+    class FakeResp:
+        status_code = 200
+        headers = httpx.Headers([
+            ("content-type", "application/json"),
+            ("set-cookie", cookie_a),
+            ("set-cookie", cookie_b),
+        ])
+
+        async def aiter_raw(self):
+            yield b"{}"
+
+        async def aclose(self):
+            pass
+
+    class FakeHttp:
+        def build_request(self, **kwargs):
+            return object()
+
+        async def send(self, request, stream=False):
+            return FakeResp()
+
+    monkeypatch.setattr(proxy, "http_client", FakeHttp())
+    r = client.post("/api/proxy/app/api/auth/callback/credentials")
+
+    cookies = r.headers.get_list("set-cookie")
+    assert cookies == [cookie_a, cookie_b]          # два ОТДЕЛЬНЫХ заголовка
+    assert len(cookies) == 2
+    # И ни один из них не является склейкой обеих кук.
+    assert not any("authjs.callback-url" in c and "authjs.session-token" in c for c in cookies)
+
+
+def test_proxy_request_headers_keep_duplicates_and_single_real_ip(proxy_env, monkeypatch):
+    """Запросные заголовки тоже собираются сырыми парами: дубликаты (несколько
+    Cookie) не теряются, а X-Real-IP остаётся РОВНО один — свой, а не входящий
+    от nginx (иначе апстрим получал бы два разных значения)."""
+    Session, client = proxy_env
+    _seed_app(Session, online=True)
+
+    from app.routers import proxy
+    captured = {}
+
+    class FakeResp:
+        status_code = 204
+        headers = httpx.Headers({})
+
+        async def aiter_raw(self):
+            yield b""
+
+        async def aclose(self):
+            pass
+
+    class FakeHttp:
+        def build_request(self, **kwargs):
+            captured["headers"] = httpx.Headers(kwargs["headers"])
+            return object()
+
+        async def send(self, request, stream=False):
+            return FakeResp()
+
+    monkeypatch.setattr(proxy, "http_client", FakeHttp())
+    r = client.get("/api/proxy/app/", headers=[
+        ("cookie", "a=1"),
+        ("cookie", "b=2"),
+        ("x-real-ip", "203.0.113.9"),   # подделка/наследие от внешнего nginx
+    ])
+    assert r.status_code == 204
+
+    sent = captured["headers"]
+    assert sent.get_list("cookie") == ["a=1", "b=2"]     # дубликаты не схлопнуты
+    assert len(sent.get_list("x-real-ip")) == 1          # ровно один
+    assert sent["x-real-ip"] != "203.0.113.9"            # наш, а не входящий
+    assert "authorization" not in sent
+    assert "host" not in sent
+
+
 def test_proxy_connect_error_502(proxy_env, monkeypatch):
     Session, client = proxy_env
     _seed_app(Session, online=True)

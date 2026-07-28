@@ -7,3 +7,8 @@ pytest==9.1.1
 # Линтер (используется в CI и локально). Мягкий пин — это dev-инструмент,
 # не влияет на рантайм продукта.
 ruff>=0.6
+
+# Reference-энкодер QR для dev-smoke голденов exo-pay
+# (tests/test_market_exo_pay_qr.py, importorskip — без него тест скипается).
+# 🔴 В сам компонент exo-pay НЕ едет: он stdlib-only (deps=[]).
+qrcode>=7.4

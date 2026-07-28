@@ -195,10 +195,15 @@ async def proxy_to_application(
     target_port = run_config.effective_port(deployment.internal_port, deployment.detected_port)
     target_url = f"http://{target_instance.container_name}:{target_port}/{path}"
 
-    headers = dict(request.headers)
-    headers["X-Real-IP"] = request.client.host
-    headers.pop("host", None)
-    headers.pop("authorization", None)
+    # Заголовки запроса — СПИСОК сырых пар, а не dict: `dict(request.headers)`
+    # схлопывает повторяющиеся заголовки (несколько Cookie/X-Forwarded-For — выживал
+    # только последний). Убираем host (контейнер адресуем по имени), authorization
+    # (basic-auth приложения проверен выше, апстриму он не нужен) и ВХОДЯЩИЙ x-real-ip
+    # (его ставит nginx) — свой добавляем ниже, иначе получилось бы два заголовка.
+    client_host = request.client.host if request.client else "unknown"
+    headers = [(k, v) for k, v in request.headers.raw
+               if k.lower() not in (b"host", b"authorization", b"x-real-ip")]
+    headers.append((b"x-real-ip", client_host.encode("latin-1", "ignore")))
 
     try:
         proxied_req = http_client.build_request(
@@ -209,13 +214,23 @@ async def proxy_to_application(
         # ВАЖНО: стримим через StreamingResponse, а не Response(content=<async gen>) —
         # базовый Response пытается .encode() контент и падает на async-генераторе.
         # aclose() в background закрывает upstream-соединение после отдачи тела.
-        resp_headers = {k: v for k, v in proxied_resp.headers.items() if k.lower() not in _HOP_BY_HOP}
-        return StreamingResponse(
+        # Заголовки ответа отдаём СЫРЫМИ парами (`.raw`), а не через dict/items():
+        # httpx склеивает одноимённые заголовки через ", ", а Set-Cookie склеивать
+        # НЕЛЬЗЯ (RFC 6265 §3: один заголовок = одна кука; в `Expires` своя запятая).
+        # Апстрим, ставящий две куки за раз (напр. Auth.js — callback-url +
+        # session-token), терял вторую: часть клиентов парсит склейку как одну куку и
+        # сессия не ставилась — вход «молча не происходил». raw_headers присваиваем
+        # после конструктора: starlette принимает в `headers=` только Mapping, а он
+        # дубликаты по определению не хранит.
+        raw_headers = [(k, v) for k, v in proxied_resp.headers.raw
+                       if k.decode("latin-1").lower() not in _HOP_BY_HOP]
+        response = StreamingResponse(
             proxied_resp.aiter_raw(),
             status_code=proxied_resp.status_code,
-            headers=resp_headers,
             background=BackgroundTask(proxied_resp.aclose),
         )
+        response.raw_headers = raw_headers
+        return response
     except (httpx.ConnectError, httpx.ConnectTimeout):
         # Реплика числится online, но соединиться не удалось: refused/DNS-fail
         # (ConnectError) ИЛИ таймаут коннекта (ConnectTimeout — НЕ подкласс

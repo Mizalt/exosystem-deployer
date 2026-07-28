@@ -351,12 +351,12 @@ def _capture_build_kwargs(monkeypatch):
 
 
 def test_build_cpu_shares_default_passed(monkeypatch, tmp_path):
-    """Env не задан → дефолт 512 уходит в client.api.build как container_limits."""
+    """Env не задан → дефолт 512 уходит в container_limits (рядом с mem-лимитом)."""
     monkeypatch.delenv("DEPLOYER_BUILD_CPU_SHARES", raising=False)
     captured = _capture_build_kwargs(monkeypatch)
     docker_manager.build_image_if_needed(
         _make_zip(tmp_path / "a.zip"), image_cache_key="cpu1")
-    assert captured["container_limits"] == {"cpushares": 512}
+    assert captured["container_limits"]["cpushares"] == 512
 
 
 def test_build_cpu_shares_custom_value(monkeypatch, tmp_path):
@@ -365,16 +365,16 @@ def test_build_cpu_shares_custom_value(monkeypatch, tmp_path):
     captured = _capture_build_kwargs(monkeypatch)
     docker_manager.build_image_if_needed(
         _make_zip(tmp_path / "b.zip"), image_cache_key="cpu2")
-    assert captured["container_limits"] == {"cpushares": 256}
+    assert captured["container_limits"]["cpushares"] == 256
 
 
 def test_build_cpu_shares_zero_disables(monkeypatch, tmp_path):
-    """«0» → троттл выключен: container_limits НЕ передаётся вовсе."""
+    """«0» → CPU-троттл выключен: ключа cpushares нет (но mem-лимит остаётся)."""
     monkeypatch.setenv("DEPLOYER_BUILD_CPU_SHARES", "0")
     captured = _capture_build_kwargs(monkeypatch)
     docker_manager.build_image_if_needed(
         _make_zip(tmp_path / "c.zip"), image_cache_key="cpu3")
-    assert "container_limits" not in captured
+    assert "cpushares" not in captured["container_limits"]
 
 
 def test_build_cpu_shares_empty_disables(monkeypatch, tmp_path):
@@ -383,4 +383,64 @@ def test_build_cpu_shares_empty_disables(monkeypatch, tmp_path):
     captured = _capture_build_kwargs(monkeypatch)
     docker_manager.build_image_if_needed(
         _make_zip(tmp_path / "d.zip"), image_cache_key="cpu4")
-    assert "container_limits" not in captured
+    assert "cpushares" not in captured["container_limits"]
+
+
+# --------------------------------------------------------------------------- #
+#  (д) 🔴 Лимит ПАМЯТИ сборки: анти-«один build душит ВСЮ ноду»
+# --------------------------------------------------------------------------- #
+
+def test_build_mem_limit_default_passed(monkeypatch, tmp_path):
+    """Env не задан → в container_limits уходят memory И memswap (== друг другу, без
+    своп-трэша на build), значения в БАЙТАХ и положительные."""
+    monkeypatch.delenv("DEPLOYER_BUILD_MEM_LIMIT", raising=False)
+    captured = _capture_build_kwargs(monkeypatch)
+    docker_manager.build_image_if_needed(
+        _make_zip(tmp_path / "m1.zip"), image_cache_key="mem1")
+    limits = captured["container_limits"]
+    assert limits["memory"] > 0
+    assert limits["memswap"] == limits["memory"]  # memswap==memory → без свопа на build
+
+
+def test_build_mem_limit_custom_value(monkeypatch, tmp_path):
+    """Явный env ('512m') парсится в байты и прокидывается в memory+memswap."""
+    monkeypatch.setenv("DEPLOYER_BUILD_MEM_LIMIT", "512m")
+    captured = _capture_build_kwargs(monkeypatch)
+    docker_manager.build_image_if_needed(
+        _make_zip(tmp_path / "m2.zip"), image_cache_key="mem2")
+    limits = captured["container_limits"]
+    assert limits["memory"] == 512 * 1024 * 1024
+    assert limits["memswap"] == 512 * 1024 * 1024
+
+
+def test_build_mem_limit_zero_disables(monkeypatch, tmp_path):
+    """«0» → лимит памяти сборки снят (opt-out): memory/memswap не передаются."""
+    monkeypatch.setenv("DEPLOYER_BUILD_MEM_LIMIT", "0")
+    monkeypatch.setenv("DEPLOYER_BUILD_CPU_SHARES", "0")  # и cpu снят → limits пуст вовсе
+    captured = _capture_build_kwargs(monkeypatch)
+    docker_manager.build_image_if_needed(
+        _make_zip(tmp_path / "m3.zip"), image_cache_key="mem3")
+    assert "container_limits" not in captured  # оба лимита сняты → ключа нет
+
+
+def test_build_mem_limit_off_but_cpu_on(monkeypatch, tmp_path):
+    """mem снят, но cpu задан → container_limits есть, но БЕЗ memory (обратная совм.)."""
+    monkeypatch.setenv("DEPLOYER_BUILD_MEM_LIMIT", "none")
+    monkeypatch.setenv("DEPLOYER_BUILD_CPU_SHARES", "512")
+    captured = _capture_build_kwargs(monkeypatch)
+    docker_manager.build_image_if_needed(
+        _make_zip(tmp_path / "m4.zip"), image_cache_key="mem4")
+    limits = captured["container_limits"]
+    assert limits == {"cpushares": 512}
+    assert "memory" not in limits
+
+
+def test_parse_size_to_bytes():
+    """Парсер размеров: суффиксы b/k/m/g, число-байт, мусор → None."""
+    assert docker_manager._parse_size_to_bytes("1g") == 1024 ** 3
+    assert docker_manager._parse_size_to_bytes("512m") == 512 * 1024 ** 2
+    assert docker_manager._parse_size_to_bytes("2048") == 2048
+    assert docker_manager._parse_size_to_bytes("1.5g") == int(1.5 * 1024 ** 3)
+    assert docker_manager._parse_size_to_bytes("junk") is None
+    assert docker_manager._parse_size_to_bytes("") is None
+    assert docker_manager._parse_size_to_bytes("0") is None

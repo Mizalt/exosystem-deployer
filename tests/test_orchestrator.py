@@ -25,11 +25,13 @@ def patched(monkeypatch, fake_docker):
 
     calls = {"deploy": [], "remove": []}
 
-    def fake_deploy(zip_path, instance_name, port, image_cache_key=None, build_config=None, env_vars=None, status="restarting"):
+    def fake_deploy(zip_path, instance_name, port, image_cache_key=None, build_config=None,
+                    env_vars=None, data_volume=None, status="restarting"):
         cname = f"deployer-{instance_name}"
         fake_docker.containers.add(FakeContainer(cname, status="running"))
         calls["deploy"].append({"zip_path": zip_path, "name": instance_name, "port": port,
-                                "image_cache_key": image_cache_key, "build_config": build_config, "env_vars": env_vars})
+                                "image_cache_key": image_cache_key, "build_config": build_config,
+                                "env_vars": env_vars, "data_volume": data_volume})
         return f"id_{cname}", cname
 
     def fake_remove(container_name):
@@ -57,6 +59,44 @@ def test_scale_up_creates_single_instance(db, deployment, patched, fake_docker):
     # имя контейнера сохранено с реальным префиксом 'deployer-'
     assert insts[0].container_name == "deployer-dep_qwe_v1.0.0_9001"
     assert insts[0].assigned_port == 9001
+
+
+def test_deploy_passes_stable_data_volume_name(db, deployment, patched):
+    """ADR G2: reconcile прокидывает в deploy_service имя персистентного тома,
+    выведенное из СТАБИЛЬНОГО id деплоя (deployer-data-<dep.id>) — том переживёт
+    редеплой и общий для реплик сервиса."""
+    orchestrator.reconcile(db)
+    vol = patched["deploy"][0]["data_volume"]
+    assert vol == f"deployer-data-{deployment.id}"
+
+
+def test_data_volume_name_isolated_between_services(db, deployment, patched):
+    """🔴 Изоляция: два разных сервиса → РАЗНЫЕ имена тома (по разным dep.id),
+    один сервис не смонтирует том другого."""
+    from app.services import docker_manager
+    other = models.Deployment(
+        blueprint_id=deployment.blueprint_id,
+        artifact_id=deployment.artifact_id,
+        target_replicas=1,
+        group_name="backend-services",
+    )
+    db.add(other)
+    db.commit()
+    assert docker_manager.data_volume_name(deployment.id) != \
+        docker_manager.data_volume_name(other.id)
+
+
+def test_stateful_single_replica_guard(db, deployment, patched):
+    """ADR G2: сервис с data-томом = stateful → scale>1 ПИНУЕТСЯ к 1 реплике
+    (N реплик на одном SQLite-томе = порча данных)."""
+    deployment.target_replicas = 5
+    db.commit()
+
+    orchestrator.reconcile(db)
+
+    insts = _instances(db, deployment)
+    assert len(insts) == 1               # несмотря на target=5 — ровно одна реплика
+    assert len(patched["deploy"]) == 1
 
 
 def test_zip_path_normalized_to_posix(db, deployment, patched):

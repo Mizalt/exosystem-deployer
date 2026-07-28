@@ -1,9 +1,10 @@
 # --- ИСПРАВЛЕННЫЙ ФАЙЛ: app/database.py ---
 
 import os
+from contextlib import closing
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # УДАЛЯЕМ ГЛОБАЛЬНЫЙ ИМПОРТ, КОТОРЫЙ ВЫЗЫВАЕТ ЦИКЛ
@@ -42,6 +43,80 @@ engine = create_engine(
     pool_recycle=1800,
     pool_pre_ping=True,
 )
+
+
+BUSY_TIMEOUT_MS = 10_000
+
+
+def apply_sqlite_pragmas(dbapi_connection) -> None:
+    """WAL + `busy_timeout` на КАЖДОЕ соединение деплоерской БД.
+
+    ADR-137 после боевого инцидента поправил ПУЛ, но не ЖУРНАЛ. Ниже — что фикс
+    журнала даёт и чего НЕ даёт; всё замерено, тесты в
+    `tests/test_deployer_db_pragmas.py` воспроизводят обе половины.
+
+    ЧТО WAL ДАЁТ:
+      * читатель НЕ встаёт, когда долгая write-транзакция спиллит страничный кэш
+        на диск. На rollback-журнале спилл обязан поднять лок до EXCLUSIVE
+        (грязные страницы идут прямо в файл БД) — и читатель получает
+        `database is locked`: замер 20/20 прогонов, отказ через ~440 мс. В WAL
+        страницы уходят в `-wal`, читатель продолжает читать свой снапшот:
+        20/20 успех за ~7 мс. Это и есть наша защита, потому что у деплоера самый
+        долгий писатель на платформе — сессия держится всю docker-сборку
+        (минуты, `build_service`), и именно она рано или поздно спиллит кэш;
+      * узкое окно КОММИТА: читатель в цикле ловил 1–2 `database is locked` на
+        каждый крупный коммит без WAL и ровно 0 с WAL (4 прогона). Эффект
+        реальный, но событий единицы на тысячи чтений — в тест не вынесен,
+        стабильно воспроизводится только спилл выше.
+
+    ЧЕГО WAL НЕ ДАЁТ — второго одновременного ПИСАТЕЛЯ. Замер: пока писатель
+    держит write-транзакцию, второй писатель получает `database is locked` и ДО
+    фикса (5,53 с), и ПОСЛЕ (10,95 с). Изменилось только терпение: дефолт
+    pysqlite 5 000 мс → наши 10 000 мс. Поэтому здесь НЕ написано «читатели
+    больше не блокируются» и «WAL разводит писателя и читателей» — прежняя
+    формулировка была преувеличением.
+
+    Поправка к прежнему комментарию в этом же месте: НЕЗАКОММИЧЕННЫЙ писатель
+    держит RESERVED, а не EXCLUSIVE, и сам по себе читателей НЕ блокирует — на
+    `journal_mode=delete` читатель спокойно читает при открытой транзакции
+    писателя (проверено, тест это фиксирует). EXCLUSIVE появляется только на
+    коммите и при спилле кэша.
+
+    `busy_timeout` поднимаем до 10 000 мс — вдвое больше дефолта pysqlite
+    (замерено: драйвер и без нас ставит 5 000 мс, а не ноль).
+
+    `journal_mode` — свойство ФАЙЛА, не соединения (переживает рестарт),
+    повторная установка на каждом коннекте — безвредный no-op. `synchronous`
+    сознательно НЕ трогаем: дефолт надёжнее при внезапном ребуте ноды.
+    Best-effort: сбой PRAGMA не роняет старт — БД останется на прежнем журнале.
+    Курсор закрываем через `closing`: раньше `cursor.close()` стоял последней
+    строкой `try`, поэтому отказ на втором PRAGMA оставлял курсор незакрытым.
+
+    🔗 Осознанный дубль `app/cloud/database.apply_sqlite_pragmas` (тот же приём,
+    гейт T7 `28_HOSTING_BRIDGE.md`): движки живут в разных изданиях — open-core
+    деплоер и cloud-контрол-плейн со своим entrypoint `app.cloud.app:cloud_app`
+    (`Dockerfile.cloud`), — и общий импорт поднимал бы деплоерский движок в
+    процессе контрол-плейна. Правишь здесь — правь и там; расхождение двух копий
+    ловит `tests/test_cloud_db_pragmas.py::test_both_editions_apply_the_same_pragmas`.
+    """
+    try:
+        with closing(dbapi_connection.cursor()) as cursor:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    except Exception as e:  # noqa: BLE001 — гигиена соединения, не критичный путь
+        print(f"ERROR: deployer-db PRAGMA (WAL/busy_timeout) не применились: {e}")
+
+
+# Слушатель ИМЕНОВАННЫЙ (не lambda) — чтобы тест мог проверить именно ДОСТАВКУ
+# фикса до боевого движка через `event.contains`. Сами значения PRAGMA тест
+# сверяет на своём ФАЙЛОВОМ движке: на `:memory:` WAL не включается, поэтому
+# проверка на подменённом в тестах движке была бы «зелёной, но не доехавшей».
+def _deployer_connect_listener(dbapi_connection, _record) -> None:
+    apply_sqlite_pragmas(dbapi_connection)
+
+
+event.listen(engine, "connect", _deployer_connect_listener)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()

@@ -2,7 +2,7 @@
 
 Фикстуры `api_env`/`auth_client` — общие, в `tests/conftest.py`.
 """
-from app import models, security
+from app import models, run_config, security
 
 
 # --------------------------------------------------------------------------- #
@@ -198,6 +198,117 @@ def test_redeploy_success_swaps_version(auth_client, monkeypatch):
     assert svc["artifact"]["version_tag"] == "v2"
 
 
+def test_redeploy_merges_env_and_confirms(auth_client, monkeypatch):
+    """🔑 РЕПРО P3/Ш2 (нода): redeploy принимает опц. `env_vars`, МЕРЖИТ их в env
+    сервиса (свои ключи, заданные в панели ноды, не затираются — это не replace) и
+    ЯВНО подтверждает доставку флагом `env_applied`. Без него ЛК не смог бы довезти
+    доступ админа на ЖИВОЙ сервис, не меняя адрес сайта."""
+    client, Session = auth_client
+    import main
+    dep_id, a2_id = _make_deployment_two_versions(Session, "redeploy-env")
+    monkeypatch.setattr(main.docker_manager, "build_image_if_needed", lambda *a, **k: "img:ok")
+    # Свой ключ владельца уже на ноде + ключ, который перезапишет доставка.
+    assert client.patch(f"/api/services/{dep_id}/config",
+                        json={"env_vars": {"MY_OWN": "keep", "EXO_AUTH_ADMIN_EMAIL": "old@x"}}
+                        ).status_code == 200
+    r = client.post(f"/api/services/{dep_id}/redeploy",
+                    json={"artifact_id": a2_id,
+                          "env_vars": {"EXO_AUTH_ADMIN_EMAIL": "owner@example.com",
+                                       "EXO_AUTH_ADMIN_PASSWORD": "s3cret"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["env_applied"] is True         # нода подтвердила доставку
+    s = Session()
+    env = run_config.env_from_json(s.query(models.Deployment).get(dep_id).env_vars)
+    s.close()
+    assert env["MY_OWN"] == "keep"                 # чужие ключи целы (merge, не replace)
+    assert env["EXO_AUTH_ADMIN_EMAIL"] == "owner@example.com"   # доставка перезаписала
+    assert env["EXO_AUTH_ADMIN_PASSWORD"] == "s3cret"
+    svc = next(x for x in client.get("/api/services").json() if x["id"] == dep_id)
+    assert svc["artifact"]["version_tag"] == "v2"  # свап версии тоже прошёл
+
+
+def test_redeploy_without_env_keeps_old_and_denies_confirmation(auth_client, monkeypatch):
+    """🔴 Совместимость (T2): СТАРЫЙ ЛК ключ `env_vars` не шлёт → env сервиса не
+    трогаем, а `env_applied` False — молчание не должно читаться как доставка
+    (fail-closed на другой стороне: ЛК гейтит пометку доступа именно по этому флагу)."""
+    client, Session = auth_client
+    import main
+    dep_id, a2_id = _make_deployment_two_versions(Session, "redeploy-noenv")
+    monkeypatch.setattr(main.docker_manager, "build_image_if_needed", lambda *a, **k: "img:ok")
+    assert client.patch(f"/api/services/{dep_id}/config",
+                        json={"env_vars": {"MY_OWN": "keep"}}).status_code == 200
+    r = client.post(f"/api/services/{dep_id}/redeploy", json={"artifact_id": a2_id})
+    assert r.status_code == 200, r.text
+    assert r.json()["env_applied"] is False
+    s = Session()
+    env = run_config.env_from_json(s.query(models.Deployment).get(dep_id).env_vars)
+    s.close()
+    assert env == {"MY_OWN": "keep"}               # env прежний, ничего не потеряли
+
+
+def test_redeploy_env_rolled_back_when_build_fails(auth_client, monkeypatch):
+    """🔴 Fail-closed (T2): сборка упала → откат забирает и merge env, и версию. Нода
+    не рапортует доставку env, которой не случилось (ответа 200 вообще нет — 400)."""
+    client, Session = auth_client
+    import main
+    dep_id, a2_id = _make_deployment_two_versions(Session, "redeploy-env-fail")
+    monkeypatch.setattr(main.docker_manager, "build_image_if_needed",
+                        lambda *a, **k: "img:ok")
+    assert client.patch(f"/api/services/{dep_id}/config",
+                        json={"env_vars": {"MY_OWN": "keep"}}).status_code == 200
+
+    def boom(*a, **k):
+        raise RuntimeError("Ошибка сборки образа:\nboom")
+
+    monkeypatch.setattr(main.docker_manager, "build_image_if_needed", boom)
+    r = client.post(f"/api/services/{dep_id}/redeploy",
+                    json={"artifact_id": a2_id, "env_vars": {"EXO_AUTH_ADMIN_PASSWORD": "s3cret"}})
+    assert r.status_code == 400, r.text
+    s = Session()
+    dep = s.query(models.Deployment).get(dep_id)
+    env = run_config.env_from_json(dep.env_vars)
+    s.close()
+    assert env == {"MY_OWN": "keep"}               # merge откатился вместе со сборкой
+    svc = next(x for x in client.get("/api/services").json() if x["id"] == dep_id)
+    assert svc["artifact"]["version_tag"] == "v1"  # версия тоже не сменилась
+
+
+def test_redeploy_rejects_identity_mismatch(auth_client, monkeypatch):
+    """🔴 B (оборона на ноде, реюз rowid SQLite): redeploy с ОЖИДАЕМЫМ именем, не
+    совпадающим с реальным именем сервиса по этому id → 409 «service identity mismatch»,
+    версия НЕ свапается (нода не перекатывает чужого жильца по реюзнутому rowid).
+    Совместимость: без expected_name старый клиент работает как раньше."""
+    client, Session = auth_client
+    import main
+    dep_id, a2_id = _make_deployment_two_versions(Session, "identity-app")
+    monkeypatch.setattr(main.docker_manager, "build_image_if_needed", lambda *a, **k: "img:ok")
+    # Имя не то (id реюзнут другим сервисом) → отказ, без свапа.
+    bad = client.post(f"/api/services/{dep_id}/redeploy",
+                      json={"artifact_id": a2_id, "expected_name": "someone-elses-app"})
+    assert bad.status_code == 409, bad.text
+    assert "identity mismatch" in bad.json()["detail"]
+    svc = next(x for x in client.get("/api/services").json() if x["id"] == dep_id)
+    assert svc["artifact"]["version_tag"] == "v1"   # версия не сменилась
+    # Правильное имя (blueprint-имя сервиса) → штатный redeploy.
+    ok = client.post(f"/api/services/{dep_id}/redeploy",
+                     json={"artifact_id": a2_id, "expected_name": "identity-app"})
+    assert ok.status_code == 200, ok.text
+    svc = next(x for x in client.get("/api/services").json() if x["id"] == dep_id)
+    assert svc["artifact"]["version_tag"] == "v2"
+
+
+def test_redeploy_stream_rejects_identity_mismatch(auth_client, monkeypatch):
+    """🔴 B (оборона в глубину): stream-redeploy тоже отклоняет несовпадение имени 409
+    (симметрично /redeploy), чтобы будущий вызов по реюзнутому rowid не перекатил чужого.
+    Отказ происходит ДО запуска фоновой сборки."""
+    client, Session = auth_client
+    dep_id, a2_id = _make_deployment_two_versions(Session, "identity-stream-app")
+    bad = client.post(f"/api/services/{dep_id}/redeploy-stream",
+                      json={"artifact_id": a2_id, "expected_name": "someone-elses-app"})
+    assert bad.status_code == 409, bad.text
+    assert "identity mismatch" in bad.json()["detail"]
+
+
 def test_groups_crud_and_validation(auth_client):
     client, _ = auth_client
 
@@ -303,6 +414,96 @@ def test_service_scale_rejects_out_of_range(auth_client):
     assert client.post(f"/api/services/{dep_id}/scale", json={"target_replicas": -1}).status_code == 400
 
 
+def test_delete_service_removes_data_volume(auth_client, monkeypatch):
+    """ADR G2 lifecycle: истинное удаление сервиса сносит персистентный том данных
+    (по стабильному dep.id) — орфаны тома не копятся."""
+    from app.services import docker_manager
+    client, Session = auth_client
+    dep_id = _make_deployment(Session, name="del-vol")
+
+    removed = {}
+    monkeypatch.setattr(docker_manager, "remove_data_volume",
+                        lambda deployment_id: removed.setdefault("id", deployment_id) or True)
+
+    r = client.delete(f"/api/services/{dep_id}")
+    assert r.status_code == 204
+    assert removed["id"] == dep_id
+
+
+def test_delete_service_removes_volume_after_row_gone(auth_client, monkeypatch):
+    """ADR G3 порядок (finding #5): том снимается ПОСЛЕ удаления записи деплоя, чтобы
+    фоновый reconcile не пересоздал реплику в окне между сносом контейнеров и
+    удалением строки (иначе орфан-том)."""
+    from app.services import docker_manager
+    client, Session = auth_client
+    dep_id = _make_deployment(Session, name="del-order")
+
+    row_alive_at_call = {}
+
+    def _spy(deployment_id):
+        probe = Session()
+        try:
+            row_alive_at_call["alive"] = probe.get(models.Deployment, deployment_id) is not None
+        finally:
+            probe.close()
+        return True
+
+    monkeypatch.setattr(docker_manager, "remove_data_volume", _spy)
+    assert client.delete(f"/api/services/{dep_id}").status_code == 204
+    # К моменту снятия тома запись деплоя уже удалена — reconcile не воскресит реплику.
+    assert row_alive_at_call["alive"] is False
+
+
+def test_create_service_purges_stale_data_volume(auth_client, monkeypatch):
+    """🔴 ADR G3 изоляция (finding #4): при создании сервиса сносим любой орфан-том с
+    тем же именем — id деплоя (rowid SQLite) переиспользуем, новый сервис не должен
+    унаследовать данные удалённого предшественника."""
+    import main
+    client, _ = auth_client
+    bp_id = client.post("/api/blueprints", json={"name": "purge-app"}).json()["id"]
+    import io
+    art_id = client.post(f"/api/blueprints/{bp_id}/artifacts",
+                         data={"version_tag": "v1"},
+                         files={"zip_file": ("a.zip", io.BytesIO(b"PK\x03\x04bad"), "application/zip")}).json()["id"]
+    client.post("/api/groups", json={"name": "gp", "start_port": 9301, "end_port": 9310})
+
+    purged = {}
+    monkeypatch.setattr(main.docker_manager, "purge_stale_data_volume",
+                        lambda deployment_id: purged.setdefault("id", deployment_id) or True)
+
+    r = client.post("/api/services", json={"artifact_id": art_id, "group_name": "gp"})
+    assert r.status_code == 200
+    assert purged["id"] == r.json()["id"]
+
+
+def test_create_service_aborts_when_data_volume_occupied(auth_client, monkeypatch):
+    """🔴 ADR G3 FAIL-CLOSED (finding #4): том прежнего сервиса ещё занят (purge вернул
+    False) → создание НЕ монтирует чужие данные, откатывает деплой и возвращает 409."""
+    import main
+    client, Session = auth_client
+    bp_id = client.post("/api/blueprints", json={"name": "occ-app"}).json()["id"]
+    import io
+    art_id = client.post(f"/api/blueprints/{bp_id}/artifacts",
+                         data={"version_tag": "v1"},
+                         files={"zip_file": ("a.zip", io.BytesIO(b"PK\x03\x04bad"), "application/zip")}).json()["id"]
+    client.post("/api/groups", json={"name": "go", "start_port": 9401, "end_port": 9410})
+
+    seen = {}
+
+    def _occupied(deployment_id):
+        seen["id"] = deployment_id
+        return False   # том занят осиротевшим держателем — снять не удалось
+
+    monkeypatch.setattr(main.docker_manager, "purge_stale_data_volume", _occupied)
+
+    r = client.post("/api/services", json={"artifact_id": art_id, "group_name": "go"})
+    assert r.status_code == 409
+    # Строка деплоя откачена — id вернулся в пул, чужой том не смонтирован.
+    s = Session()
+    assert s.query(models.Deployment).filter_by(id=seen["id"]).first() is None
+    s.close()
+
+
 def test_service_logs_falls_back_to_saved_crash_logs(auth_client):
     client, Session = auth_client
     dep_id = _make_deployment(Session, name="crash")
@@ -317,6 +518,70 @@ def test_service_logs_falls_back_to_saved_crash_logs(auth_client):
     assert body["status"] == "failed"
     assert body["exit_code"] == 1
     assert "phonenumbers" in body["logs"]
+
+
+def test_service_probe_reports_status_code_only(auth_client, monkeypatch):
+    """HTTP-зонд ноды (G1-v2, ADR-181): GET к online-реплике изнутри deployer-net,
+    наружу — ТОЛЬКО код ответа (тело приложения не возвращается); path уходит в URL
+    контейнера; битый путь → 400; отказ соединения → reachable=false (не 5xx роута)."""
+    import main
+    client, Session = auth_client
+    dep_id = _make_deployment(Session, name="probe-me")
+    s = Session()
+    s.add(models.Instance(deployment_id=dep_id, container_name="deployer-probe-1",
+                          assigned_port=9557, status="online"))
+    s.commit()
+    s.close()
+
+    seen = []
+
+    class _Resp:
+        status_code = 500
+        text = "секретный traceback приложения"
+
+    monkeypatch.setattr(main.httpx, "get",
+                        lambda url, **kw: (seen.append(url), _Resp())[1])
+    r = client.get(f"/api/services/{dep_id}/probe")
+    assert r.status_code == 200
+    assert r.json() == {"supported": True, "reachable": True, "status_code": 500}
+    assert seen == ["http://deployer-probe-1:80/"]   # дефолтный порт 80, путь «/»
+    assert "traceback" not in r.text                 # тело приложения наружу не течёт
+
+    # path пробрасывается в URL контейнера; не-абсолютный/с query → 400 (белый список)
+    r = client.get(f"/api/services/{dep_id}/probe", params={"path": "/api/health"})
+    assert r.status_code == 200
+    assert seen[-1] == "http://deployer-probe-1:80/api/health"
+    assert client.get(f"/api/services/{dep_id}/probe",
+                      params={"path": "http://evil"}).status_code == 400
+    assert client.get(f"/api/services/{dep_id}/probe",
+                      params={"path": "/x?q=1"}).status_code == 400
+
+    # Отказ соединения контейнера → честный reachable=false (роут сам не падает).
+    import httpx as _httpx
+
+    def _boom(url, **kw):
+        raise _httpx.ConnectError("refused")
+
+    monkeypatch.setattr(main.httpx, "get", _boom)
+    r = client.get(f"/api/services/{dep_id}/probe")
+    assert r.json() == {"supported": True, "reachable": False, "error": "connect"}
+
+
+def test_service_probe_portless_and_offline_unsupported(auth_client):
+    """Зонд неприменим: нет online-реплик ИЛИ воркер без сетевого порта
+    (internal_port=0) → supported=false, а не ложный провал."""
+    client, Session = auth_client
+    dep_id = _make_deployment(Session, name="probe-portless")
+    r = client.get(f"/api/services/{dep_id}/probe")
+    assert r.status_code == 200
+    assert r.json()["supported"] is False            # реплик нет
+    s = Session()
+    dep = s.query(models.Deployment).filter_by(id=dep_id).one()
+    dep.internal_port = 0
+    s.commit()
+    s.close()
+    r = client.get(f"/api/services/{dep_id}/probe")
+    assert r.json() == {"supported": False, "reason": "portless"}
 
 
 def test_login_flow(api_env):

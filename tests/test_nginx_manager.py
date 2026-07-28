@@ -114,8 +114,11 @@ def test_app_https_redirect_block_not_limited(monkeypatch, tmp_path):
     assert "limit_req" not in http_server
 
 
-def test_panel_config_has_no_rate_limit(monkeypatch, tmp_path):
-    """Панель (10-panel.conf) НЕ лимитируется — panel и app это разные server-блоки."""
+def test_panel_config_has_rate_limit(monkeypatch, tmp_path):
+    """Панель (10-panel.conf) НЕСЁТ санитарный limit_req/limit_conn: её домен
+    обслуживает и публичный неаутентифицированный POST /api/auth/token, а тело
+    поднято до 100m — без conn/req-лимита это усиливало бы flood/slow-body-DoS.
+    Держим симметрично app-доменам (общие зоны app_rl/app_conn)."""
     monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
     # Отключаем побочные эффекты catchall (openssl в контейнере) и правки прав webroot.
     monkeypatch.setattr(nginx_manager, "_write_catchall_if_changed", lambda: False)
@@ -125,8 +128,42 @@ def test_panel_config_has_no_rate_limit(monkeypatch, tmp_path):
     content = (tmp_path / "10-panel.conf").read_text(encoding="utf-8")
 
     assert "server_name panel.example.com" in content
-    assert "limit_req" not in content
-    assert "limit_conn" not in content
+    assert "limit_req zone=app_rl burst=60 nodelay;" in content
+    assert "limit_conn app_conn 40;" in content
+    # Лимиты — на проксирующем location /, НЕ в ACME-локации (SSL-выпуск не лимитируем).
+    acme_block = content.split(".well-known/acme-challenge/")[1].split("}")[0]
+    assert "limit_req" not in acme_block
+
+
+def test_panel_config_has_body_size_limit(monkeypatch, tmp_path):
+    """Панель несёт client_max_body_size (100m) во всех ветках location / — иначе
+    nginx берёт дефолт 1 МБ и режет публикацию ЛК (мультифайл-сайт с картинками)
+    «413 Request Entity Too Large» ДО FastAPI. Rate-зон у панели по-прежнему нет."""
+    monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
+    monkeypatch.setattr(nginx_manager, "_write_catchall_if_changed", lambda: False)
+    monkeypatch.setattr(nginx_manager, "ensure_acme_webroot_traversable", lambda: None)
+
+    # HTTP-only ветка (домен без SSL).
+    nginx_manager.update_panel_nginx_config(domain="panel.example.com", ssl_cert_name=None)
+    http_only = (tmp_path / "10-panel.conf").read_text(encoding="utf-8")
+    assert "client_max_body_size 100m;" in http_only
+    # 100m без conn/req-лимита усиливал бы DoS на публичный /token → лимит соседствует.
+    assert "limit_req zone=app_rl burst=60 nodelay;" in http_only
+
+    # HTTPS-ветка: лимит тела висит на проксирующем 443-блоке (не на 301-редиректе 80).
+    nginx_manager.update_panel_nginx_config(
+        domain="panel.example.com", ssl_cert_name="panel.example.com")
+    https = (tmp_path / "10-panel.conf").read_text(encoding="utf-8")
+    # HTTP-блок (80) — только редирект, без лимитов; лимиты на проксирующем 443-блоке.
+    http80 = https.split("listen 443")[0]
+    assert "limit_req" not in http80
+    proxied = https.split("listen 443")[1]
+    assert "client_max_body_size 100m;" in proxied
+    assert "limit_req zone=app_rl burst=60 nodelay;" in proxied
+    # 100m ≥ ЛК-максимума ~32 МБ (PUBLISH_MAX_BYTES + PUBLISH_MAX_ASSET_BYTES).
+    from app.cloud.services import code_studio
+    lk_max = code_studio.PUBLISH_MAX_BYTES + code_studio.PUBLISH_MAX_ASSET_BYTES
+    assert 100 * 1024 * 1024 >= lk_max
 
 
 def test_catchall_template_has_no_rate_limit():
@@ -164,3 +201,77 @@ def test_app_config_applies_per_app_override(monkeypatch, tmp_path):
     assert "client_max_body_size 500m;" in content
     # Дефолтов P0 в этом конфиге больше нет (перекрыты для этого app).
     assert "burst=60 nodelay;" not in content
+
+
+# --- Self-heal: пересборка vhost'ов приложений на старте (тикет blood-pit, 413) ---
+
+
+# Конфиг СТАРОГО образца — так писал деплоер до ADR-099: proxy-локация без
+# client_max_body_size, из-за чего nginx брал дефолт 1 МБ и резал загрузки «413».
+_LEGACY_CONF = """server {
+    listen 80;
+    server_name old.example.com;
+    location / { proxy_pass http://deployer:7999/api/proxy/oldapp/; }
+}"""
+
+
+def test_resync_upgrades_legacy_config_without_body_limit(monkeypatch, tmp_path):
+    """🔴 Тикет blood-pit (дефект 2): у приложения, созданного СТАРЫМ деплоером,
+    в конфиге нет client_max_body_size → nginx режет тело >1 МБ (413), и обновление
+    деплоера само по себе это не чинило. Пересборка на старте поднимает конфиг до
+    текущего шаблона."""
+    monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
+    (tmp_path / "oldapp.conf").write_text(_LEGACY_CONF, encoding="utf-8")
+
+    changed = nginx_manager.resync_application_configs(
+        [("oldapp", "old.example.com", None)])
+
+    assert changed == 1
+    content = (tmp_path / "oldapp.conf").read_text(encoding="utf-8")
+    assert "client_max_body_size 100m;" in content      # загрузки до 100 МБ проходят
+    assert "limit_req zone=app_rl" in content           # заодно приехали лимиты P0
+
+
+def test_resync_is_idempotent_no_needless_reload(monkeypatch, tmp_path):
+    """Актуальный конфиг не переписывается — иначе каждый рестарт деплоера дёргал бы
+    reload nginx на всех приложениях впустую."""
+    monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
+    apps = [("app1", "a1.example.com", "a1.example.com")]
+
+    assert nginx_manager.resync_application_configs(apps) == 1   # первый проход — создал
+    assert nginx_manager.resync_application_configs(apps) == 0   # второй — без изменений
+
+
+def test_resync_preserves_pro_override(monkeypatch, tmp_path):
+    """Пересборка НЕ раздевает приложение: per-app override владельца (PRO) остаётся,
+    иначе рестарт молча возвращал бы P0-дефолты (ADR-100)."""
+    monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
+    (tmp_path / "pro_app.conf").write_text(_LEGACY_CONF, encoding="utf-8")
+
+    nginx_manager.resync_application_configs(
+        [("pro_app", "pro.example.com", None)],
+        override_lookup=lambda name: {"burst": 200, "conn": 10, "body_size": "500m"})
+
+    content = (tmp_path / "pro_app.conf").read_text(encoding="utf-8")
+    assert "client_max_body_size 500m;" in content
+    assert "burst=60 nodelay;" not in content
+
+
+def test_resync_skips_app_without_domain_and_survives_errors(monkeypatch, tmp_path):
+    """Приложение без домена своего vhost не имеет (пропуск), а сбой на одном
+    приложении не срывает остальные — нода обязана стартовать."""
+    monkeypatch.setattr(app_config, "NGINX_SITES_DIR", tmp_path)
+
+    def boom(name):
+        if name == "bad":
+            raise RuntimeError("битый override")
+        return None
+
+    changed = nginx_manager.resync_application_configs(
+        [("nodomain", None, None), ("bad", "bad.example.com", None),
+         ("good", "good.example.com", None)],
+        override_lookup=boom)
+
+    assert changed == 1                                  # доехало «good»
+    assert not (tmp_path / "nodomain.conf").exists()
+    assert (tmp_path / "good.conf").exists()
