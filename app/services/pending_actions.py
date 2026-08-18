@@ -319,8 +319,17 @@ def _handle_self_update(db, action) -> None:
 
     params = _load(action)
     if not params.get("started"):
+        # 🔴 Источник забирается ИЗ ПАМЯТИ и один раз: в payload его нет
+        # намеренно. Ждали источник, а его нет — процесс перезапустился между
+        # постановкой и подхватом. Отказываем вслух: обновиться из ДРУГОГО
+        # источника значит тихо посадить ноду на не тот код.
+        source = self_update.take_source(action.id)
+        if params.get("source_expected") and not source:
+            _fail(action, "Источник обновления утрачен (деплоер перезапускался). "
+                          "Повторите обновление.")
+            return
         try:
-            self_update.launch_updater(params.get("ref"))
+            self_update.launch_updater(params.get("ref"), source)
         except self_update.SelfUpdateError as e:
             _fail(action, str(e))
             return

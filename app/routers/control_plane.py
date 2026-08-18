@@ -89,10 +89,22 @@ def admin_recover(data: CpkTokenIn, db: Session = Depends(get_db)):
 class UpdateIn(BaseModel):
     token: str
     ref: str | None = None  # тег/ветка/SHA; пусто = fast-forward текущей ветки
+    # Откуда брать код. Пусто = из собственного `origin` ноды, как было
+    # всегда. Непустое — адрес, присланный контрол-плейном (может нести
+    # учётные данные), и тогда он НЕ сохраняется на ноде: ни в payload
+    # задачи, ни в .git/config, ни в журнале. См. `self_update`.
+    source: str | None = None
 
 
-def _enqueue_self_update(db: Session, ref: str | None, title: str) -> dict:
-    """Общий enqueue для update/rollback: одна активная задача, предусловия синхронно."""
+def _enqueue_self_update(db: Session, ref: str | None, title: str,
+                         source: str | None = None) -> dict:
+    """Общий enqueue для update/rollback: одна активная задача, предусловия синхронно.
+
+    🔴 ИСТОЧНИК В PAYLOAD НЕ ПОПАДАЕТ. Payload лежит в базе ноды и уезжает в
+    зеркало задач, которое видно в интерфейсе: учётные данные осели бы там
+    навсегда и на виду. В payload идёт ЗАТЁРТЫЙ адрес (человеку он нужен —
+    «откуда обновлялись»), сам секрет живёт в памяти процесса до запуска
+    updater'а и забирается один раз."""
     from app.services import self_update
 
     err = self_update.precheck()
@@ -101,8 +113,14 @@ def _enqueue_self_update(db: Session, ref: str | None, title: str) -> dict:
     for a in crud.list_pending_actions(db, active_only=True):
         if a.type == "self_update":
             raise HTTPException(status_code=409, detail="Обновление уже выполняется.")
+    payload = {"ref": ref}
+    if source:
+        payload["source_shown"] = self_update.redact_source(source)
+        payload["source_expected"] = True
     action = crud.create_pending_action(
-        db, "self_update", title, json.dumps({"ref": ref}, ensure_ascii=False))
+        db, "self_update", title, json.dumps(payload, ensure_ascii=False))
+    if source:
+        self_update.stash_source(action.id, source)
     return {"task_id": action.id, "status": action.status}
 
 
@@ -113,8 +131,10 @@ def admin_update(data: UpdateIn, db: Session = Depends(get_db)):
     Сам своп делает updater-джоба: build-first, health-гейт, авто-откат."""
     _verified_payload(data.token, "update")
     ref = (data.ref or "").strip() or None
+    source = (data.source or "").strip() or None
     return _enqueue_self_update(
-        db, ref, "Обновление деплоера" + (f" → {ref}" if ref else ""))
+        db, ref, "Обновление деплоера" + (f" → {ref}" if ref else ""),
+        source=source)
 
 
 @router.post("/api/admin/rollback")

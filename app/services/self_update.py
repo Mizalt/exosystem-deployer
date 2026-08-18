@@ -45,15 +45,30 @@ command -v git >/dev/null 2>&1 || { echo "E: git не найден на хост
 COMPOSE="docker compose"; docker compose version >/dev/null 2>&1 || COMPOSE="docker-compose"
 PREV=$(git rev-parse HEAD) || { echo "E: не git-репозиторий"; exit 2; }
 echo "PREV_REF=$PREV"
-git fetch --tags --force origin 2>&1 || echo "W: git fetch не удался (offline?) — пробую локальный ref"
-if [ -n "${REF:-}" ]; then
-  git checkout -f "$REF" 2>&1 || { echo "E: ref не найден: $REF"; exit 2; }
-  git merge --ff-only "origin/$REF" 2>&1 || true
+if [ -n "${SOURCE:-}" ]; then
+  # ИСТОЧНИК ЗАДАН КОНТРОЛ-ПЛЕЙНОМ. Три правила:
+  #   1. `git remote add` НЕ делаем — иначе адрес осядет в .git/config навсегда;
+  #   2. вывод глушим и печатаем свою строку — git норовит показать адрес целиком;
+  #   3. работаем через FETCH_HEAD: ссылку с секретом в имени не заводим.
+  echo "Источник: указан контрол-плейном"
+  if ! git fetch --tags --force "$SOURCE" "${REF:-main}" >/dev/null 2>/tmp/exo-fetch.err; then
+    echo "E: не удалось получить код из указанного источника (адрес/доступ/сеть)"
+    exit 2
+  fi
+  git checkout -f FETCH_HEAD >/dev/null 2>&1 || { echo "E: не удалось встать на полученный код"; exit 2; }
 else
-  BR=$(git rev-parse --abbrev-ref HEAD); [ "$BR" = "HEAD" ] && BR=main
-  git checkout -f "$BR" 2>&1
-  git merge --ff-only "origin/$BR" 2>&1 || { echo "E: fast-forward не удался (локальные правки в install-каталоге?)"; exit 2; }
+  echo "Источник: собственный origin"
+  git fetch --tags --force origin 2>&1 || echo "W: git fetch не удался (offline?) — пробую локальный ref"
+  if [ -n "${REF:-}" ]; then
+    git checkout -f "$REF" 2>&1 || { echo "E: ref не найден: $REF"; exit 2; }
+    git merge --ff-only "origin/$REF" 2>&1 || true
+  else
+    BR=$(git rev-parse --abbrev-ref HEAD); [ "$BR" = "HEAD" ] && BR=main
+    git checkout -f "$BR" 2>&1
+    git merge --ff-only "origin/$BR" 2>&1 || { echo "E: fast-forward не удался (локальные правки в install-каталоге?)"; exit 2; }
+  fi
 fi
+rm -f /tmp/exo-fetch.err
 NEW=$(git rev-parse HEAD)
 echo "NEW_REF=$NEW"
 if [ "$NEW" = "$PREV" ]; then echo "ALREADY_UP_TO_DATE"; exit 0; fi
@@ -201,8 +216,44 @@ def precheck() -> str | None:
         return str(e)
 
 
-def launch_updater(ref: str | None) -> None:
-    """Запускает одноразовый updater-контейнер (detach). Бросает SelfUpdateError."""
+import re as _re
+
+# 🔴 ИСТОЧНИК ОБНОВЛЕНИЯ ЖИВЁТ В ПАМЯТИ И ОДИН РАЗ.
+#
+# Адрес может нести учётные данные. Положи мы его в payload задачи — он лёг
+# бы в базу ноды и уехал в зеркало задач, видимое в интерфейсе; положи в
+# файл — остался бы на диске. Поэтому он держится здесь, ключом по номеру
+# задачи, и ЗАБИРАЕТСЯ РОВНО ОДИН РАЗ — тем, кто запускает updater.
+#
+# Цена принята сознательно: перезапуск процесса между постановкой задачи и
+# её подхватом теряет источник, и обновление честно падает с внятной
+# причиной. Это лучше молчаливого обновления из ДРУГОГО источника.
+_SOURCES: dict[int, str] = {}
+
+
+def stash_source(task_id: int, source: str) -> None:
+    """Кладёт источник до запуска updater'а. Ничего не пишет на диск."""
+    _SOURCES[int(task_id)] = source
+
+
+def take_source(task_id: int) -> str | None:
+    """Забирает источник НАВСЕГДА: второй вызов вернёт None."""
+    return _SOURCES.pop(int(task_id), None)
+
+
+def redact_source(source: str | None) -> str:
+    """Адрес без секрета — для payload, логов и интерфейса."""
+    if not source:
+        return ""
+    return _re.sub(r"//[^/@\s]*@", "//<секрет>@", source)
+
+
+def launch_updater(ref: str | None, source: str | None = None) -> None:
+    """Запускает одноразовый updater-контейнер (detach). Бросает SelfUpdateError.
+
+    🔴 `source` уходит в контейнер ПЕРЕМЕННОЙ ОКРУЖЕНИЯ, а не в текст команды:
+    аргументы командной строки видны всем процессам машины.
+    """
     client = get_docker_client()
     me = _self_container(client)
     install_dir = host_install_dir(client)
@@ -223,7 +274,8 @@ def launch_updater(ref: str | None) -> None:
         name=UPDATER_CONTAINER,
         command=["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--",
                  "/bin/sh", "-c", HOST_SCRIPT],
-        environment={"REF": ref or "", "INSTALL_DIR": install_dir, "SELF": SELF_CONTAINER},
+        environment={"REF": ref or "", "INSTALL_DIR": install_dir,
+                     "SELF": SELF_CONTAINER, "SOURCE": source or ""},
         privileged=True,
         pid_mode="host",
         network_mode="none",  # сеть контейнеру не нужна: nsenter -n уводит скрипт в сеть хоста
