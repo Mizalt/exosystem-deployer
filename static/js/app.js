@@ -177,7 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loginScreen.style.display = 'none';
         appContainer.style.display = 'flex';
         wireModalForms();
-        const initialPage = window.location.hash.substring(1) || 'services';
+        const initialPage = window.location.hash.substring(1) || 'dashboard';
         if (!window.location.hash) window.location.replace('#' + initialPage);
         navigate(initialPage);
         startPolling();  // live-обновление статусов/логов
@@ -338,11 +338,37 @@ document.addEventListener('DOMContentLoaded', () => {
         columns: { label: 'Колонки', icon: 'view_column',  render: renderColumnsView },
     };
     const getDashboardView = () => { const v = localStorage.getItem('dashboardView'); return DASHBOARD_VIEWS[v] ? v : 'graph'; };
+    // Персональная раскладка дашборда (плотность + свёрнутость секций). Живёт в
+    // localStorage, а НЕ в DOM: renderDashboard() пересобирает разметку целиком (в т.ч.
+    // автоматически после мутаций, см. maybeRefreshDashboard) — состояние обязано
+    // читаться НА РЕНДЕРЕ. Ключ один на все настройки вида: `dashPrefs`.
+    const getDashPrefs = () => { try { return JSON.parse(localStorage.getItem('dashPrefs') || '{}') || {}; } catch (_) { return {}; } };
+    const setDashPrefs = (patch) => {
+        const next = Object.assign(getDashPrefs(), patch);
+        try { localStorage.setItem('dashPrefs', JSON.stringify(next)); } catch (_) { /* приватный режим — раскладка просто не запомнится */ }
+        return next;
+    };
+    // Однострочная сводка в заголовок секции: свёрнутая секция не должна «ослеплять».
+    const setDashSum = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
 
     function initDashboardPage() { renderDashboard(); }
 
     async function renderDashboard() {
         const view = getDashboardView();
+        const prefs = getDashPrefs();
+        // Секции по умолчанию раскрыты; свёрнутость — только явная (0 в prefs).
+        const srvOpen = prefs.server !== 0, dockOpen = prefs.docker !== 0;
+        // Плотность: на низком окне (панель в iframe ЛК) компактный режим включён ПО
+        // УМОЛЧАНИЮ — но это дефолт ТУМБЛЕРА, а не отдельное CSS-правило: правило за
+        // спиной кнопки делало её там визуально мёртвой, а aria-pressed врал про экран.
+        // Явный выбор пользователя (0/1 в prefs) всегда сильнее дефолта.
+        const dense = prefs.dense == null ? window.innerHeight <= 780 : prefs.dense === 1;
+        const sectionHead = (key, icon, title, open, hint) =>
+            `<button type="button" class="dash-section-label dash-section-toggle" data-dash-section="${key}" aria-expanded="${open ? 'true' : 'false'}">`
+            + `<span class="material-symbols-outlined">${icon}</span>${title}`
+            + (hint ? ` <span class="dash-section-hint">${hint}</span>` : '')
+            + `<span class="dash-section-sum" id="dash${key === 'server' ? 'Server' : 'Docker'}Sum"></span>`
+            + `<span class="material-symbols-outlined advanced-toggle-chevron">chevron_right</span></button>`;
         mainContent.innerHTML = `
             <header>
                 <h1>Дашборд</h1>
@@ -350,17 +376,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="view-switcher" id="dashViewSwitcher">
                         ${Object.entries(DASHBOARD_VIEWS).map(([k, v]) => `<button class="view-option ${k === view ? 'active' : ''}" data-view="${k}" title="${v.label}"><span class="material-symbols-outlined">${v.icon}</span>${v.label}</button>`).join('')}
                     </div>
+                    <button class="btn-icon-label" id="dashDenseBtn" aria-pressed="${dense ? 'true' : 'false'}" title="Компактные показатели — больше места холсту связей"><span class="material-symbols-outlined">${dense ? 'density_small' : 'density_medium'}</span>Компактно</button>
                     <button class="btn-icon-label" id="dashRefreshBtn"><span class="material-symbols-outlined">refresh</span>Обновить</button>
                 </div>
             </header>
-            <div class="page-content dashboard-content">
-                <div class="dash-section-label"><span class="material-symbols-outlined">monitor_heart</span>Сервер <span class="dash-section-hint">динамика за 24 часа</span></div>
-                <div id="hostHealthWrap">${hostHealthSkeletonHTML()}</div>
-                <div class="dash-section-label"><span class="material-symbols-outlined">deployed_code</span>Сервисы и Docker</div>
-                <div class="metrics-strip" id="metricsStrip">${metricsSkeletonHTML()}</div>
-                <div class="dashboard-view-host" id="dashViewHost"><p style="color:var(--text-secondary)">Загрузка…</p></div>
+            <div class="page-content dashboard-content${dense ? ' dense' : ''}">
+                ${sectionHead('server', 'monitor_heart', 'Сервер', srvOpen, 'динамика за 24 часа')}
+                <div id="hostHealthWrap"${srvOpen ? '' : ' hidden'}>${hostHealthSkeletonHTML()}</div>
+                <div class="dash-mini" id="hostHealthMini"${srvOpen ? ' hidden' : ''}></div>
+                ${sectionHead('docker', 'deployed_code', 'Сервисы и Docker', dockOpen, '')}
+                <div class="metrics-strip" id="metricsStrip"${dockOpen ? '' : ' hidden'}>${metricsSkeletonHTML()}</div>
+                <div class="dash-mini" id="metricsMini"${dockOpen ? ' hidden' : ''}></div>
+                <div class="dashboard-view-host${view === 'graph' ? ' is-graph' : ''}" id="dashViewHost"><p style="color:var(--text-secondary)">Загрузка…</p></div>
             </div>`;
         document.getElementById('dashViewSwitcher').querySelectorAll('.view-option').forEach(btn => btn.onclick = () => { localStorage.setItem('dashboardView', btn.dataset.view); renderDashboard(); });
+        document.getElementById('dashDenseBtn').onclick = () => { setDashPrefs({ dense: dense ? 0 : 1 }); renderDashboard(); };
         document.getElementById('dashRefreshBtn').onclick = () => { invalidateCache('blueprints', 'services', 'applications', 'systemMetrics', 'hostHealth', 'metricsHistory'); renderDashboard(); };
         loadDashboardMetrics();
         loadHostHealth();
@@ -383,6 +413,27 @@ document.addEventListener('DOMContentLoaded', () => {
         ).join('');
     }
 
+    // --- Мини-плитки свёрнутых секций (превращение в мини-графики): иконка + значение +
+    // микро-спарклайн; при наведении — попап с детализацией показателя. ---
+    const trendPct = (vals) => {
+        const nums = (vals || []).filter(v => v != null);
+        if (nums.length < 2 || !nums[0]) return null;
+        const d = ((nums[nums.length - 1] - nums[0]) / nums[0]) * 100;
+        const s = Math.abs(d) >= 10 ? Math.round(d) : Math.round(d * 10) / 10;
+        return (d > 0.5 ? '▲ ' : d < -0.5 ? '▼ ' : '· ') + s + '%';
+    };
+    const miniRows = (rows) => rows.map(r =>
+        `<div class="mp-row"><span>${r[0]}</span><b>${r[2] ? `<i class="mp-trend ${r[2]}">${r[1]}</i>` : r[1]}</b></div>`).join('');
+    const miniCardHTML = (icon, value, title, rows) =>
+        `<div class="mini-card"><span class="material-symbols-outlined mini-ic">${icon}</span>`
+        + `<div class="mini-val">${value}</div>`
+        + `<div class="mini-pop"><div class="mp-title">${title}</div>${miniRows(rows)}</div></div>`;
+    const miniCardSpark = (icon, value, title, rows, vals, lvl) =>
+        `<div class="mini-card"><span class="material-symbols-outlined mini-ic">${icon}</span>`
+        + `<div class="mini-val">${value}</div>`
+        + `<div class="mini-spark">${sparklineSVG(vals, lvl, 24)}</div>`
+        + `<div class="mini-pop"><div class="mp-title">${title}</div>${miniRows(rows)}</div></div>`;
+
     async function loadDashboardMetrics() {
         const strip = document.getElementById('metricsStrip');
         if (!strip) return;
@@ -403,10 +454,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 metricCardHTML('RAM сервисов', fmtMb(load.memory_usage_mb), `из ${fmtMb(host.mem_total_mb)} хоста`) +
                 metricCardHTML('Сеть сервисов', `↓ ${fmtMb(load.net_rx_mb)}`, `↑ ${fmtMb(load.net_tx_mb)}`) +
                 metricCardHTML('Диск Docker', fmtMb(disk.images_mb), `образы · тома ${fmtMb(disk.volumes_mb)} · Docker ${host.server_version ?? '?'}`);
+            // Сводка для свёрнутой секции (данные грузятся всегда, свёрнутость их не гасит).
+            setDashSum('dashDockerSum', `${online} online · ${failed} failed`);
+            // Мини-плитки свёрнутой секции: те же показатели, но иконка + значение.
+            const mini = document.getElementById('metricsMini');
+            if (mini) mini.innerHTML = [
+                miniCardHTML('deployed_code', `${online} online`, 'Сервисы', [['В работе', `${online} из ${services.length}`], ['Упали', failed], ['Всего', services.length]]),
+                miniCardHTML('memory', `${Math.round((load.cpu_percent ?? 0) * 10) / 10}%`, 'CPU сервисов', [['Загрузка', `${Math.round((load.cpu_percent ?? 0) * 10) / 10}%`], ['Контейнеров запущено', load.managed_running ?? 0]]),
+                miniCardHTML('data_usage', fmtMb(load.memory_usage_mb), 'RAM сервисов', [['Занято сервисами', fmtMb(load.memory_usage_mb)], ['Хост всего', fmtMb(host.mem_total_mb)]]),
+                miniCardHTML('network_check', `↓ ${fmtMb(load.net_rx_mb)}`, 'Сеть сервисов', [['Входящий', `↓ ${fmtMb(load.net_rx_mb)}`], ['Исходящий', `↑ ${fmtMb(load.net_tx_mb)}`]]),
+                miniCardHTML('storage', fmtMb(disk.images_mb), 'Диск Docker', [['Образы', fmtMb(disk.images_mb)], ['Тома', fmtMb(disk.volumes_mb)]]),
+            ].join('');
         } catch (e) {
             // Даже при сбое Docker карточки остаются на месте (значение «—», подпись «недоступно»),
             // чтобы полоса метрик не схлопывалась и верстка не прыгала.
             if (getToken()) strip.innerHTML = METRIC_LABELS.map(l => metricCardHTML(l, '—', 'недоступно')).join('');
+            setDashSum('dashDockerSum', 'недоступно');
         }
     }
 
@@ -477,6 +540,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try { h = await fetchData('hostHealth', '/api/host/health'); }
         catch (e) {
             if (getToken()) wrap.innerHTML = `<div class="metrics-strip host-health-strip">${HH_LABELS.map(l => `<div class="metric-card"><div class="metric-label">${l}</div><div class="metric-value">—</div><div class="metric-sub">недоступно</div></div>`).join('')}</div>`;
+            setDashSum('dashServerSum', 'недоступно');
             return;
         }
         let hist = null;
@@ -509,6 +573,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 metricSeries(hist, 3, disk.used_pct))
             + swapCard
             + `</div>${warnHTML}`;
+        // Сводка для свёрнутой секции: цифры хоста остаются видимыми в заголовке.
+        setDashSum('dashServerSum', `ЦП ${hhPct(cpuPct)} · Память ${hhPct(mem.used_pct)} · Диск ${hhPct(disk.used_pct)}`
+            + (warns.length ? ` · ⚠ ${warns.length}` : ''));
+        // Мини-плитки свёрнутой секции: микро-спарклайны динамики за 24 ч + попап.
+        const mini = document.getElementById('hostHealthMini');
+        if (mini) {
+            const mk = (icon, label, pct, vals, rows) => miniCardSpark(icon, hhPct(pct), label,
+                [...rows, trendPct(vals) ? ['Тренд за 24 ч', trendPct(vals), pct != null && pct >= 80 ? 'down' : 'up'] : null].filter(Boolean),
+                vals, hhLevel(pct));
+            mini.innerHTML = [
+                mk('memory', 'ЦП сервера', cpuPct, metricSeries(hist, 1, cpuPct),
+                    [['Load average', load ? load.map(x => x.toFixed(2)).join(' ') : '—'], ['Ядер', cpu ?? '?']]),
+                mk('data_usage', 'Память сервера', mem.used_pct, metricSeries(hist, 2, mem.used_pct),
+                    [['Занято', hhPct(mem.used_pct)], ['Доступно', mem.available_mb == null ? '—' : `${(mem.available_mb / 1024).toFixed(1)} GB`]]),
+                mk('storage', 'Диск сервера', disk.used_pct, metricSeries(hist, 3, disk.used_pct),
+                    [['Свободно', disk.free_gb == null ? '—' : `${disk.free_gb} GB из ${disk.total_gb} GB`]]),
+                miniCardHTML('swap_vert', noSwap ? 'нет' : hhPct(swap.used_pct), 'Swap',
+                    [['Использовано', noSwap ? 'не настроен' : hhPct(swap.used_pct)],
+                     noSwap ? null : ['Выделено', `${(swap.total_mb / 1024).toFixed(1)} GB`]].filter(Boolean)),
+            ].join('');
+        }
     }
 
     // Авто-обновление дашборда после мутирующего запроса (если открыт он и нет модалки).
@@ -606,6 +691,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <button class="graph-ctl" data-z="in" title="Приблизить"><span class="material-symbols-outlined">add</span></button>
                     <button class="graph-ctl" data-z="out" title="Отдалить"><span class="material-symbols-outlined">remove</span></button>
                     <button class="graph-ctl" data-z="fit" title="Вместить"><span class="material-symbols-outlined">fit_screen</span></button>
+                    <button class="graph-ctl" data-z="full" title="Во весь экран (Esc — выйти)"><span class="material-symbols-outlined">open_in_full</span></button>
                 </div>
                 <div class="graph-hint">Колесо — масштаб · перетаскивание — панорама · клик по связи — детали</div>
             </div>`;
@@ -644,8 +730,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Хранит активный resize-обработчик холста, чтобы снять его при ре-рендере.
-    let graphResizeHandler = null;
+    // Хранит активные глобальные обработчики холста, чтобы снять их при ре-рендере.
+    let graphResizeHandler = null, graphKeyHandler = null;
     // --- Граф-холст: детерминированная раскладка, узлы+рёбра в одном transform-мире. ---
     // Координаты рёбер берутся из раскладки (а не из getBoundingClientRect), поэтому
     // стрелки совпадают с узлами при любом масштабе/панораме — корень прежних промахов.
@@ -749,9 +835,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const fit = () => {
             const vw = viewport.clientWidth, vh = viewport.clientHeight;
             if (!vw || !vh) return;
-            zoom = clamp(Math.min(vw / worldW, vh / worldH) * 0.92, 0.2, 1.2);
+            // 0.98 вместо 0.92 и потолок 1.6 вместо 1.2: маленький граф должен реально
+            // заполнять окно, а не висеть маркой в центре. Кламп zoomAt (2.5) — отдельный.
+            zoom = clamp(Math.min(vw / worldW, vh / worldH) * 0.98, 0.2, 1.6);
             panX = (vw - worldW * zoom) / 2; panY = (vh - worldH * zoom) / 2;
             apply();
+        };
+        // Развёрнутый холст: класс на вьюпорте + ЯВНЫЙ fit — resize-события при смене
+        // класса не будет, без него граф останется в старом масштабе.
+        const setFull = (on) => {
+            viewport.classList.toggle('graph-full', on);
+            const icon = host.querySelector('[data-z="full"] .material-symbols-outlined');
+            if (icon) icon.textContent = on ? 'close_fullscreen' : 'open_in_full';
+            requestAnimationFrame(fit);
         };
         const zoomAt = (mx, my, factor) => {
             const nz = clamp(zoom * factor, 0.2, 2.5);
@@ -768,6 +864,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         host.querySelector('#graphControls').addEventListener('click', e => {
             const z = e.target.closest('button')?.dataset.z; if (!z) return;
+            if (z === 'full') return setFull(!viewport.classList.contains('graph-full'));
             if (z === 'fit') return fit();
             const r = viewport.getBoundingClientRect();
             zoomAt(r.width / 2, r.height / 2, z === 'in' ? 1.2 : 1 / 1.2);
@@ -815,6 +912,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (graphResizeHandler) window.removeEventListener('resize', graphResizeHandler);
         graphResizeHandler = () => fit();
         window.addEventListener('resize', graphResizeHandler);
+        // Esc — выход из развёрнутого холста (не мешает диалогам: реагируем только когда
+        // холст реально развёрнут). Слушатель один, снимается при ре-рендере.
+        if (graphKeyHandler) document.removeEventListener('keydown', graphKeyHandler);
+        graphKeyHandler = (e) => {
+            if (e.key !== 'Escape' || !viewport.classList.contains('graph-full')) return;
+            e.preventDefault(); setFull(false);
+        };
+        document.addEventListener('keydown', graphKeyHandler);
     }
 
     // --- Боковая панель деталей (popup) для любого элемента дашборда ---
@@ -2512,9 +2617,29 @@ document.addEventListener('DOMContentLoaded', () => {
             bar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
             bar.parentElement.querySelectorAll(':scope > .tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
         }
+        // Сворачивание секций дашборда: показатели отдают высоту холсту связей.
+        // Состояние пишем в localStorage (`dashPrefs`) — renderDashboard() пересобирает
+        // разметку целиком и восстановит его на следующем рендере.
+        const dashSection = e.target.closest('[data-dash-section]');
+        if (dashSection) {
+            const key = dashSection.dataset.dashSection;
+            const open = dashSection.getAttribute('aria-expanded') !== 'true';
+            dashSection.setAttribute('aria-expanded', open ? 'true' : 'false');
+            const body = document.getElementById(key === 'server' ? 'hostHealthWrap' : 'metricsStrip');
+            if (body) { if (open) body.removeAttribute('hidden'); else body.setAttribute('hidden', ''); }
+            // Свернули секцию — показатели превращаются в мини-плитки с микро-графиками
+            // (hover — попап с детализацией); развернули — полные карточки возвращаются.
+            const mini = document.getElementById(key === 'server' ? 'hostHealthMini' : 'metricsMini');
+            if (mini) { if (open) mini.setAttribute('hidden', ''); else mini.removeAttribute('hidden'); }
+            setDashPrefs({ [key]: open ? 1 : 0 });
+            // Холст стал выше/ниже, а resize-события браузер не пришлёт (менялась только
+            // разметка) — зовём тот же обработчик, что и на ресайзе окна, иначе освободившаяся
+            // высота графу не достанется: он останется в прежнем масштабе и не по центру.
+            if (graphResizeHandler) requestAnimationFrame(graphResizeHandler);
+        }
     });
     document.querySelectorAll('.nav-item').forEach(link => link.onclick = e => { if (e.currentTarget.id === 'logoutBtn') return; e.preventDefault(); const page = e.currentTarget.dataset.page; if (window.location.hash !== `#${page}`) window.location.hash = page; });
-    window.addEventListener('hashchange', () => navigate(window.location.hash.substring(1) || 'services'));
+    window.addEventListener('hashchange', () => navigate(window.location.hash.substring(1) || 'dashboard'));
 
     // SSO из ЛК (ADR-034 Phase 1): токен приходит во fragment `#sso_token=…` — фрагмент
     // НЕ уходит на сервер (нет в логах прокси). Подхватываем, чистим адрес, дальше — как

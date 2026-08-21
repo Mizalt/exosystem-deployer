@@ -389,7 +389,7 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 
 /* === ДАШБОРД === */
 /* Один экран без вертикального скролла: метрики сверху + вид-граф ниже. */
-.dashboard-content { display: flex; flex-direction: column; gap: 20px; height: 100%; overflow: hidden; padding-bottom: 24px; }
+.dashboard-content { display: flex; flex-direction: column; gap: 14px; height: 100%; overflow: hidden; padding-bottom: 24px; }
 
 /* Переключатель пресетов отображения (сегментированный контрол). */
 .view-switcher { display: inline-flex; gap: 2px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 100px; padding: 3px; }
@@ -445,6 +445,19 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
     text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: -8px; }
 .dash-section-label .material-symbols-outlined { font-size: 18px; }
 .dash-section-hint { text-transform: none; letter-spacing: 0; font-size: 12px; opacity: 0.8; }
+/* Заголовок-раскрывашка секции: та же типографика, но это <button> (сворачивание). */
+.dash-section-toggle { width: 100%; text-align: left; background: none; border: none; padding: 2px 0;
+    cursor: pointer; font-family: 'Google Sans', 'Roboto', sans-serif; font-weight: 500; }
+.dash-section-toggle:hover { color: var(--text-primary); }
+.dash-section-toggle .advanced-toggle-chevron { transition: transform 0.2s; }
+.dash-section-toggle[aria-expanded="true"] .advanced-toggle-chevron { transform: rotate(90deg); }
+/* Сводка свёрнутой секции: «свернул» не значит «ослеп» — цифры остаются в заголовке. */
+.dash-section-sum { margin-left: auto; text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-primary); }
+/* visibility, а не display: сводка держит своё место, и шеврон не прыгает при раскрытии. */
+.dash-section-toggle[aria-expanded="true"] .dash-section-sum { visibility: hidden; }
+/* Свёрнутое содержимое: класс .metrics-strip несёт display:grid и перебил бы UA-правило
+   [hidden]{display:none} — поэтому прячем явно. */
+.dashboard-content [hidden] { display: none; }
 .host-health-warnings { display: flex; gap: 8px; align-items: center; margin-top: 10px; padding: 10px 14px; font-size: 13px; color: var(--warning, #e0a000); background: rgba(224, 160, 0, 0.08); border: 1px solid rgba(224, 160, 0, 0.4); border-radius: 12px; }
 .host-health-warnings.crit { color: var(--danger); background: rgba(242, 139, 130, 0.08); border-color: rgba(242, 139, 130, 0.5); }
 .host-health-warnings .material-symbols-outlined { font-size: 18px; flex-shrink: 0; }
@@ -456,17 +469,47 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .banner-warn p { color: var(--text-secondary); font-size: 13px; margin: 0 0 8px; }
 .banner-warn code { display: inline-block; font-family: 'Roboto Mono', monospace; font-size: 12px; background: var(--bg-base); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; user-select: all; }
 
+/* === КОМПАКТНЫЙ РЕЖИМ ПОКАЗАТЕЛЕЙ (тумблер «Компактно») ===
+   Карточки те же и ВСЕ на месте — меняется только плотность. Расчёт по декларациям:
+   карточка ~100→66 px, со спарклайном ~144→89 px, плюс gap 20→12 → холсту связей
+   достаётся примерно +120 px (свёрнутые секции добавляют ещё ~260 px). */
+.dashboard-content.dense { gap: 12px; }
+.dashboard-content.dense .metrics-strip { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.dashboard-content.dense .metric-card { padding: 9px 12px; border-radius: 12px; }
+.dashboard-content.dense .metric-label { font-size: 10px; }
+.dashboard-content.dense .metric-value { font-size: 16px; margin: 2px 0 0; }
+.dashboard-content.dense .metric-sub { font-size: 11px; opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dashboard-content.dense .spark { height: 18px; margin: 2px 0 3px; }
+.dashboard-content.dense .hh-bar { margin: 3px 0 4px; }
+.dashboard-content.dense .metric-card.loading .metric-value { min-height: 20px; }
+.dashboard-content.dense .host-health-warnings { margin-top: 6px; padding: 6px 12px; }
+#dashDenseBtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--bg-active); }
+/* 🔴 Низкое окно (панель в iframe ЛК) уплотняется через ДЕФОЛТ ТУМБЛЕРА в renderDashboard(),
+   а НЕ через @media: правило за спиной кнопки делало её на таком окне визуально мёртвой
+   (нажимаешь — ничего не меняется) и её состояние врало про то, что на экране. */
+
 /* Хост вида — занимает остаток высоты, внутренний скролл только при переполнении. */
 .dashboard-view-host { flex-grow: 1; overflow: auto; min-height: 0; }
+/* Граф сам обрабатывает pan/zoom — внешний скролл ему не нужен и только отнимает высоту. */
+.dashboard-view-host.is-graph { overflow: hidden; }
 
 /* === ГРАФ-ХОЛСТ (динамический: pan/zoom, узлы+рёбра в одном transform-мире) === */
 .graph-viewport {
-    position: relative; width: 100%; height: 100%; min-height: 480px; overflow: hidden;
+    position: relative; width: 100%; height: 100%; min-height: 300px; overflow: hidden;
     border: 1px solid var(--border); border-radius: 16px; background: var(--bg-base);
     background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 22px 22px;
     cursor: grab; touch-action: none; user-select: none;
 }
 .graph-viewport.panning { cursor: grabbing; }
+/* Развёрнутый холст (кнопка «Во весь экран» / Esc). width/height:auto обязательны —
+   иначе 100% от окна + inset вылезут за экран. z-index НИЖЕ всего плавающего слоя:
+   центр задач (.task-center 900), FAB/чат помощника (panel_ai.css 900/901), модалки
+   (1000), drawer (1100), тосты (1200). Иначе развёрнутый холст запирает пользователя —
+   помощник и задачи становятся недоступны, а drawer по клику на узел уезжает под граф. */
+.graph-viewport.graph-full {
+    position: fixed; inset: 12px; width: auto; height: auto; z-index: 850;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
 /* Без постоянного will-change: transform — иначе браузер кеширует мир растром на
    scale=1 и при зуме масштабирует битмап (узлы/текст «мыльные» до наведения курсора,
    которое вызывает перерисовку). Слой-кеш включаем только на время панорамы — там это
@@ -709,3 +752,30 @@ input[type="file"]::file-selector-button:hover { background: #4d5154; }
 .tc-toast-close:hover { color: var(--text-primary); }
 .tc-toast-close .material-symbols-outlined { font-size: 18px; }
 @keyframes tc-slide { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: none; } }
+/* === МИНИ-ПЛИТКИ СВЁРНУТЫХ СЕКЦИЙ (21.08): сворачивание превращает показатели
+   в эффективные мини-иконки с микро-графиком; наведение — попап с детализацией. === */
+.dash-mini { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.dash-mini[hidden] { display: none; }
+.mini-card { position: relative; display: flex; align-items: center; gap: 7px;
+    padding: 6px 11px; background: var(--bg-base); border: 1px solid var(--border);
+    border-radius: 11px; cursor: default; font-size: 11.5px; transition: border-color .15s; }
+.mini-card:hover { border-color: var(--accent); }
+.mini-ic { font-size: 16px; color: var(--text-secondary); }
+.mini-val { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
+.mini-spark svg { display: block; width: 56px; height: 20px; }
+/* Попап детализации: всплывает над плиткой при наведении. Верхняя секция —
+   вниз (не обрезается шапкой), нижняя — вверх. */
+.mini-pop { display: none; position: absolute; left: 0; z-index: 60;
+    min-width: 210px; background: var(--bg-surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
+    pointer-events: none; }
+#hostHealthMini .mini-pop { top: calc(100% + 8px); bottom: auto; }
+#metricsMini .mini-pop { bottom: calc(100% + 8px); top: auto; }
+.mini-card:last-child .mini-pop { left: auto; right: 0; }
+.mini-card:hover .mini-pop { display: block; }
+.mini-pop .mp-title { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; color: var(--text-primary); }
+.mini-pop .mp-row { display: flex; justify-content: space-between; gap: 18px;
+    font-size: 11.5px; color: var(--text-secondary); padding: 1.5px 0; }
+.mini-pop .mp-row b { font-weight: 500; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.mini-pop .mp-trend.up { color: var(--success); }
+.mini-pop .mp-trend.down { color: var(--danger); }
