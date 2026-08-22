@@ -93,7 +93,7 @@ def apply_sqlite_pragmas(dbapi_connection) -> None:
     строкой `try`, поэтому отказ на втором PRAGMA оставлял курсор незакрытым.
 
     🔗 Осознанный дубль `app/cloud/database.apply_sqlite_pragmas` (тот же приём,
-    гейт T7 `28_HOSTING_BRIDGE.md`): движки живут в разных изданиях — open-core
+    гейт T7 (общая нода)): движки живут в разных изданиях — open-core
     деплоер и cloud-контрол-плейн со своим entrypoint `app.cloud.app:cloud_app`
     (`Dockerfile.cloud`), — и общий импорт поднимал бы деплоерский движок в
     процессе контрол-плейна. Правишь здесь — правь и там; расхождение двух копий

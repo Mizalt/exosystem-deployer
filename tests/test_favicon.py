@@ -20,6 +20,9 @@ _GREEN_DOT = 'fill="#6dd58c"'
 def test_favicon_files_exist_with_green_dot():
     """Favicon-файл лежит в ОБОИХ местах статики и несёт зелёную точку (тот же бренд)."""
     for rel in ("static/favicon.svg", "app/cloud/static/assets/favicon.svg"):
+        # ЛК-путь есть только в приватной редакции cloud (в публичном OSS-срезе каталога нет).
+        if rel.startswith("app/cloud") and not (_ROOT / "app" / "cloud").exists():
+            continue
         svg = (_ROOT / rel).read_text(encoding="utf-8")
         assert "<svg" in svg, f"{rel}: не SVG"
         assert _GREEN_DOT in svg, f"{rel}: нет зелёной точки {_GREEN_DOT}"
