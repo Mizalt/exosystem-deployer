@@ -22,7 +22,7 @@ GigaChat подписан РОССИЙСКИМ CA, которого нет в с
 
 `Dockerfile.cloud` копирует эту папку в `/etc/ssl/gigachat/`. Путь к бандлу —
 env `CLOUD_GIGACHAT_CA_BUNDLE` (дефолт `/etc/ssl/gigachat/russian_trusted_root_ca.pem`).
-`app/cloud/services/ai_infra.py::_vision_ssl_verify`: если файл существует → `verify=<путь>`;
+В cloud-издании: если файл существует → `verify=<путь>`;
 если НЕТ (файл не положили / dev-Windows) → `verify=True` (системный trust). То есть
 отсутствие файла НЕ ломает сборку и НЕ отключает проверку — просто нет прод-бандла.
 
